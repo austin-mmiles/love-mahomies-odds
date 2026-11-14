@@ -2,7 +2,8 @@
 import argparse, datetime, json, os, sys
 from . import config as C
 from .espn import Espn, load_league, EspnError
-from . import model, sleeper as sl
+from . import model, sleeper as sl, odds as oddsmod, blend
+from .advanced import Advanced
 
 DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "data")
 
@@ -23,13 +24,24 @@ def standings(L, W):
     return rec
 
 
-def snapshot(L, W, sleeper_proj, live, n_sims):
+def outcomes(L, W, teams):
+    """Which futures markets are decided: {market: {team: true/false}}; a market is absent until its stage is over."""
+    rounds = max(1, (min(L["playoff_teams"], len(L["teams"])) - 1).bit_length())
+    done_after = {"playoffs": L["reg_weeks"], "bye": L["reg_weeks"], "final": L["reg_weeks"] + rounds - 1, "title": L["reg_weeks"] + rounds}
+    out = {}
+    for m, wk in done_after.items():
+        if W > wk:
+            out[m] = {t: v[m] >= 0.5 for t, v in teams.items()}
+    return out
+
+
+def snapshot(L, W, sleeper_proj, live, n_sims, X=None):
     cal = model.calibration(L, W)
     frm = model.form(L, W, cal, list(L["teams"]))
     if W > C.LAST_WEEK:
         players = []
     elif live:
-        players = model.players_live(L, W, sleeper_proj, cal)
+        players = model.players_live(L, W, sleeper_proj, cal, X)
     else:
         players = model.players_backfill(L, W, cal)
     sim = model.simulate(L, W, players, frm, n_sims, seed=1000 + W)
@@ -50,6 +62,10 @@ def main(argv=None):
     ap.add_argument("--sims", type=int, default=C.N_SIMS)
     ap.add_argument("--out", default=DATA)
     ap.add_argument("--sample", action="store_true", help="mark the output as sample data")
+    ap.add_argument("--no-advanced", action="store_true", help="skip nflverse advanced stats")
+    ap.add_argument("--no-odds", action="store_true", help="skip sportsbook lines")
+    ap.add_argument("--nfl-cache", help="folder with nflverse CSVs (downloaded there if missing)")
+    ap.add_argument("--odds-cache", help="folder with odds_<week>.txt files to use instead of fetching")
     a = ap.parse_args(argv)
 
     api = Espn(C.LEAGUE_ID, C.SEASON, os.environ.get("ESPN_S2"), os.environ.get("ESPN_SWID"), a.fixtures)
@@ -60,8 +76,17 @@ def main(argv=None):
     cur = L["current_week"]
     print(f"{L['name']} {L['season']}: current week {cur}, {len(L['teams'])} teams")
     weeks = list(range(cur, C.LAST_WEEK + 1))
-    sproj = {} if (a.no_sleeper or a.fixtures) else sl.fetch(C.SEASON, weeks)
+    sproj = {} if (a.no_sleeper or a.fixtures) else sl.fetch(C.SEASON, weeks, log=print)
     used_sleeper = any(sproj.get(w) for w in weeks)
+    shist = {}
+    if used_sleeper and cur > 3:                      # past weeks, to backtest Sleeper alongside the other sources
+        shist = sl.fetch(C.SEASON, list(range(3, cur)))
+    adv = None if a.no_advanced else Advanced(C.SEASON, cache=a.nfl_cache)
+    lines = {} if (a.no_odds or cur > C.LAST_WEEK) else oddsmod.load(C.SEASON, cur, archive_dir=os.path.join(a.out, "lines"), cache_dir=a.odds_cache)
+    X = blend.context(L, cur, adv, lines, shist) if cur <= C.LAST_WEEK else None
+    if X:
+        for pos, rep in X["report"]["by_pos"].items():
+            print(f"  {pos}: weights {rep.get('weights')} rmse {rep.get('rmse')} (n={rep.get('n')})")
 
     os.makedirs(a.out, exist_ok=True)
     hpath = os.path.join(a.out, "history.json")
@@ -80,7 +105,7 @@ def main(argv=None):
         if not live and W in have:
             continue
         print(f"  simulating as of week {W} ({'live' if live else 'rebuilt'})")
-        s = snapshot(L, W, sproj, live, a.sims)
+        s = snapshot(L, W, sproj, live, a.sims, X if live else None)
         have[W] = {"week": W, "updated": now, "rebuilt": not live,
                    "teams": {t: {k: v[k] for k in keep} for t, v in s["teams"].items()}}
         if live:
@@ -96,14 +121,17 @@ def main(argv=None):
                    "playoff_teams": L["playoff_teams"], "last_week": C.LAST_WEEK},
         "updated": now, "week": W, "sims": a.sims, "sample": bool(a.sample),
         "season_over": W > C.LAST_WEEK,
-        "sources": ["ESPN"] + (["Sleeper"] if used_sleeper else []),
+        "sources": ["ESPN"] + (["Sleeper"] if used_sleeper else []) + (["nflverse usage model"] if X and X["report"]["advanced_stats"] else [])
+                   + (["DraftKings lines"] if X and X["totals"] else []),
+        "model": X["report"] if X else None,
         "teams_meta": teams_meta, "teams": latest["teams"],
         "games": [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in g.items()} for g in latest["sim"]["games"]],
         "results": [{"week": g["week"], "home": g["home"], "away": g["away"], "hs": g["hs"], "as": g["as"]}
                     for g in L["games"] if g["week"] < W and g["away"] is not None],
         "week_scores": {str(t): {k: round(v, 1) for k, v in d.items()} for t, d in latest["sim"].get("week_scores", {}).items()},
         "h2h": {str(t): {str(u): p for u, p in d.items()} for t, d in latest["sim"].get("h2h", {}).items()},
-        "players": model.player_outlook(L, W, latest["players"]),
+        "players": model.player_outlook(L, W, latest["players"], X),
+        "outcomes": outcomes(L, W, latest["teams"]),
     }
     with open(os.path.join(a.out, "latest.json"), "w") as f:
         json.dump(out, f, separators=(",", ":"))

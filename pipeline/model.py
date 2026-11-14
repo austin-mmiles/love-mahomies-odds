@@ -45,33 +45,54 @@ def has_game(L, pro, w):
     return w in (L["pro"].get(pro, {}).get("opp") or {})
 
 
-def players_live(L, W, sleeper, cal):
-    """Current rosters with ESPN weekly projections blended with Sleeper's."""
+def players_live(L, W, sleeper, cal, X=None):
+    """Current rosters; each week's expectation blends ESPN, Sleeper, the usage model and (this week) props."""
     from .sleeper import key as skey
+    from .blend import props_points, PROPS_WEIGHT, PRIOR
+    X = X or {}
     out = []
     for t, ents in L["future"][W].items():
         for e in ents:
             if e["pos"] not in C.POS:
                 continue
+            pos = e["pos"]
             ab = L["pro"].get(e["pro"], {}).get("abbrev", "")
-            k = skey(e["name"], e["pos"], ab)
-            mean, raw = np.zeros(C.LAST_WEEK + 2), {}
+            k = skey(e["name"], pos, ab)
+            u = (X.get("usage") or {}).get(e["pid"])
+            vm = (X.get("vm") or {}).get(ab, 1.0)
+            wts = (X.get("weights") or {}).get(pos) or {"espn": C.ESPN_SHARE[pos], "sleeper": 1 - C.ESPN_SHARE[pos]}
+            mean, src = np.zeros(C.LAST_WEEK + 2), {}
             for w in range(W, C.LAST_WEEK + 1):
                 fe = next((x for x in L["future"].get(w, {}).get(t, []) if x["pid"] == e["pid"]), None)
                 es = fe["proj"] if fe else 0.0
-                sw = sleeper.get(w) or {}
-                sl = sw.get(k)
+                sl = (sleeper.get(w) or {}).get(k)
                 if not has_game(L, e["pro"], w):
+                    continue
+                parts = {}
+                if es > 0.3:
+                    parts["espn"] = es
+                    if sl is not None and sl > 0.3:
+                        parts["sleeper"] = sl
+                    if u and not u["stale"] and pos in (1, 2, 3, 4):
+                        parts["usage"] = u["pts"] * (vm if w == W else 1.0)
+                    tw = sum(wts.get(a, PRIOR.get(a, 0.2)) for a in parts)
+                    m = sum(v * wts.get(a, PRIOR.get(a, 0.2)) for a, v in parts.items()) / tw
+                    if sl is not None and sl <= 0.3:            # Sleeper expects him to sit
+                        m *= 0.5
+                elif sl is not None and sl > 0.3:               # ESPN expects him to sit
+                    m = 0.5 * sl
+                else:
                     m = 0.0
-                elif sl is None:           # Sleeper has no line for him
-                    m = es
-                elif es > 0.3 and sl > 0.3:
-                    a = C.ESPN_SHARE[e["pos"]]; m = a * es + (1 - a) * sl
-                else:                      # one source expects him to sit
-                    m = 0.5 * max(es, sl)
-                mean[w] = m * cal.get(e["pos"], .95)
-                raw[w] = (round(es, 1), None if sl is None else round(sl, 1))
-            out.append(dict(e, team=t, mean=mean, play_prob=C.PLAY_PROB.get(e["inj"], 1.0), sources=raw))
+                if w == W and m > 0:
+                    lines = (X.get("props") or {}).get(e["pid"])
+                    pp = props_points(pos, lines, u["comps"] if u else None, vm) if lines else None
+                    if pp is not None and pp > 0:
+                        parts["props"] = pp
+                        m = (1 - PROPS_WEIGHT) * m + PROPS_WEIGHT * pp
+                    src = {a: round(v, 1) for a, v in parts.items()}
+                mean[w] = m * cal.get(pos, .95)
+            out.append(dict(e, team=t, mean=mean, play_prob=C.PLAY_PROB.get(e["inj"], 1.0), sources=src,
+                            vol=(X.get("vol") or {}).get(e["pid"], 1.0)))
     return out
 
 
@@ -102,7 +123,7 @@ def players_backfill(L, W, cal):
             for w in range(W, C.LAST_WEEK + 1):
                 if w >= back and has_game(L, e["pro"], w):
                     mean[w] = level * cal.get(e["pos"], .95)
-            out.append(dict(e, team=t, mean=mean, play_prob=1.0, sources={}))
+            out.append(dict(e, team=t, mean=mean, play_prob=1.0, sources={}, vol=1.0))
     return out
 
 
@@ -122,6 +143,7 @@ def simulate(L, W, players, frm, n_sims, seed=0):
     npos, nflex = _slot_counts(L["slots"])
     pos = np.array([p["pos"] for p in players]); pro = np.array([p["pro"] for p in players])
     team = np.array([ti[p["team"]] for p in players])
+    vol = np.array([p.get("vol", 1.0) for p in players])
     mean = np.stack([p["mean"] for p in players]) if P else np.zeros((0, last + 2))
     sig = {k: math.sqrt(math.log(1 + v * v)) for k, v in C.CV.items()}
     tal = (C.TALENT0 * rng.standard_normal((N, P))).astype(np.float32)
@@ -175,7 +197,8 @@ def simulate(L, W, players, frm, n_sims, seed=0):
                 else:
                     z = a * O[:, int(pro[i])] + math.sqrt(1 - a * a) * e if i >= 0 else e
                     mm = m * np.exp(tal[:, i] - var_t / 2) if i >= 0 else m
-                    pts = mm * np.exp(sig[p_] * z - sig[p_] ** 2 / 2)
+                    sg = sig[p_] if i < 0 or vol[i] == 1.0 else math.sqrt(math.log(1 + (C.CV[p_] * vol[i]) ** 2))
+                    pts = mm * np.exp(sg * z - sg ** 2 / 2)
                 tot += np.where(take, pts, 0)
             scores[w, :, t] = tot + frm.get(T[t], 0.0) + C.TEAM_SD * rng.standard_normal(N)
         played = avail & (haz > 0)[None, :]
@@ -245,25 +268,58 @@ def simulate(L, W, players, frm, n_sims, seed=0):
     return res
 
 
-def player_outlook(L, W, players):
+BOOM = {1: 25, 2: 20, 3: 20, 4: 15, 5: 12, 16: 12}     # a week that usually lands in the position's top tier
+BUST = {1: 12, 2: 7, 3: 7, 4: 5, 5: 5, 16: 2}
+
+
+def _ncdf(x):
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+def player_outlook(L, W, players, X=None):
     """Per-player rest-of-season outlook for the site."""
+    X = X or {}
+    dvp, trends = X.get("dvp") or {}, X.get("trends") or {}
     rows = []
     for p in players:
+        pos = p["pos"]
         wk = [round(float(p["mean"][w]), 1) for w in range(W, C.LAST_WEEK + 1)]
         games = [x for x in wk if x > 0]
         m = float(p["mean"][W]) if W <= C.LAST_WEEK else 0.0
-        if p["pos"] == 16:
-            lo, hi = m - Z10 * C.DST_SD, m + Z10 * C.DST_SD
+        boom = bust = None
+        if pos == 16:
+            sd = C.DST_SD
+            lo, hi = m - Z10 * sd, m + Z10 * sd
+            if m > 0:
+                boom, bust = 1 - _ncdf((BOOM[pos] - m) / sd), _ncdf((BUST[pos] - m) / sd)
         else:
-            s = math.sqrt(math.log(1 + C.CV[p["pos"]] ** 2) + C.TALENT0 ** 2)
+            s = math.sqrt(math.log(1 + (C.CV[pos] * p.get("vol", 1.0)) ** 2) + C.TALENT0 ** 2)
             lo, hi = m * math.exp(-Z10 * s - s * s / 2), m * math.exp(Z10 * s - s * s / 2)
+            if m > 0:
+                z = lambda x: (math.log(x / m) + s * s / 2) / s
+                boom, bust = 1 - _ncdf(z(BOOM[pos])), _ncdf(z(BUST[pos]))
         pr = L["pro"].get(p["pro"], {})
-        opp = pr.get("opp", {}).get(W)
+        opps, sos = [], []
+        for w in range(W, C.LAST_WEEK + 1):
+            o = pr.get("opp", {}).get(w)
+            oa = L["pro"].get(o, {}).get("abbrev") if o else None
+            opps.append(oa)
+            if oa and (oa, pos) in dvp:
+                sos.append(dvp[(oa, pos)])
+        tr = trends.get(p["pid"]) or {}
         rows.append({
-            "id": p["pid"], "name": p["name"], "pos": C.POS[p["pos"]], "nfl": pr.get("abbrev", "FA"), "team": p["team"],
+            "id": p["pid"], "name": p["name"], "pos": C.POS[pos], "nfl": pr.get("abbrev", "FA"), "team": p["team"],
             "slot": "IR" if p["slot"] == C.IR_SLOT else "", "status": p["inj"] if p["inj"] not in ("ACTIVE", "NORMAL") else "",
-            "bye": pr.get("bye"), "opp": L["pro"].get(opp, {}).get("abbrev") if opp else None,
-            "wk": round(m, 1), "floor": round(max(lo, 0) if p["pos"] != 16 else lo, 1) if m > 0 else 0, "ceil": round(hi, 1) if m > 0 else 0,
+            "bye": pr.get("bye"), "opp": opps[0] if opps else None, "opps": opps,
+            "wk": round(m, 1), "floor": round(max(lo, 0) if pos != 16 else lo, 1) if m > 0 else 0, "ceil": round(hi, 1) if m > 0 else 0,
+            "boom": None if boom is None else round(boom, 3), "bust": None if bust is None else round(bust, 3),
+            "vol": round(p.get("vol", 1.0), 2), "src": p.get("sources") or {},
+            "sos": round(sum(sos) / len(sos), 3) if sos else None,
+            "matchup": round(dvp.get((opps[0], pos), 1.0), 3) if opps and opps[0] and (opps[0], pos) in dvp else None,
+            "snap": None if tr.get("snap") is None else round(tr["snap"], 2),
+            "snap_delta": None if tr.get("snap_delta") is None else round(tr["snap_delta"], 2),
+            "tgt": None if tr.get("tgt") is None else round(tr["tgt"], 3),
+            "tgt_delta": None if tr.get("tgt_delta") is None else round(tr["tgt_delta"], 3),
             "ros_avg": round(sum(games) / len(games), 1) if games else 0.0, "ros_total": round(sum(wk), 1),
             "ros_games": len(games), "weeks": wk, "season_pts": p.get("season_pts"),
         })

@@ -19,6 +19,18 @@ commits fresh data to `docs/data/`.
 2. **Turn on Pages**: Settings → Pages → Deploy from a branch → `main`, folder `/docs`.
 3. **Run it once**: Actions → Update odds → Run workflow. The first run rebuilds history from Week 1.
 
+## Sportsbook setup (optional, about 5 minutes)
+
+The play-money sportsbook works in preview mode (bets saved in each visitor's own browser) until you connect a
+shared ledger:
+
+1. Create a free project at supabase.com.
+2. In the project's SQL Editor, paste and run `setup/supabase.sql`.
+3. In Project Settings → API, copy the Project URL and the `anon` public key into `docs/book-config.json`
+   (`supabase_url`, `supabase_anon_key`) and commit. The anon key is designed to be public.
+
+Limits (stake, win cap, credit line, vig) are in the same file.
+
 ## How it updates
 
 - Every morning, and again on Tuesday once ESPN finalizes the week.
@@ -30,8 +42,10 @@ commits fresh data to `docs/data/`.
 
 `pipeline/model.py` plays out the rest of the season 20,000 times:
 
-- Projections: ESPN weekly projections blended with Sleeper's (RotoWire), re-scored under league rules, then scaled
-  to what this league's starters have actually scored.
+- Projections: ESPN and Sleeper weekly projections, a usage model built from nflverse box scores, and (for the
+  current week) DraftKings props and team totals. Source weights are refit by backtest on every run, then everything
+  is scaled to what this league's starters have actually scored.
+- Each player's boom/bust spread comes from his own game log.
 - Each week, managers start their best lineup; scores are drawn with a floor near zero and a long upside tail.
   Quarterbacks move with their receivers and kicker; a D/ST moves against the offense it faces.
 - Injuries, questionable tags, byes, and uncertainty that grows for later weeks are included.
@@ -42,7 +56,7 @@ Constants are in `pipeline/config.py`.
 ## Run locally
 
 ```
-pip install numpy
+pip install numpy pandas
 ESPN_S2=... ESPN_SWID=... python -m pipeline.run
 python -m http.server -d docs 8000
 ```
