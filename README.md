@@ -33,7 +33,7 @@ Stake, win and credit limits are off by default (`null`); set numbers in the sam
 
 ## How it updates
 
-- Every morning, and again on Tuesday once ESPN finalizes the week.
+- Every 10 minutes the workflow checks the NFL scoreboard and re-runs the model when a game is being played, a game just started or finished, or the last update is more than 3 hours old. Otherwise it exits in a few seconds.
 - Each run refreshes the current week's snapshot. When the week rolls over, the last snapshot is kept as history.
 - Past weeks that predate the site are rebuilt once. Old rest-of-season projections are not archived, so those
   weeks use each player's projection at the time as a stand-in.

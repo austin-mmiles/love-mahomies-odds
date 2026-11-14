@@ -90,6 +90,7 @@
       : `${esc(T[fav.id].name)} leads the board at ${pct(fav.title)} to win it all.` + (mover && Math.abs(mover.d) >= 0.005 ? ` Biggest move since last week: ${esc(T[mover.r.id].name)}, ${mover.d > 0 ? 'up' : 'down'} ${Math.abs(100 * mover.d).toFixed(1)} points.` : '');
     app.innerHTML = `<h1>${esc(D.league.name)} title odds, ${weekLabel.toLowerCase() === 'final' ? 'final' : weekLabel}</h1>
       <p class="lede">${lede}</p>
+      ${liveBar()}
       <div class="scroll"><table class="board">
         <thead><tr><th class="l" colspan="2">Team</th><th class="hm">Record</th><th class="hm">Points for</th><th>Playoffs</th><th class="hm">#1 seed</th><th>Title</th><th>Price</th><th class="hm">Since last week</th><th class="l hm">Title trend</th></tr></thead>
         <tbody>${rows.map((r, i) => `<tr data-id="${r.id}"><td class="rank">${i + 1}</td><td class="l">${teamLink(r.id)}<span class="sub rec-m"> ${rec(r)}</span></td><td class="hm">${rec(r)}</td><td class="hm">${r.pf.toFixed(1)}</td>
@@ -269,6 +270,7 @@
         <li>Odds are set before each week's games and do not move during them.</li>
         <li>Sportsbook lines only exist for the current week; later weeks rely on the other sources.</li>
         <li>History from before the site launched was rebuilt afterwards and is approximate.</li>
+        <li>Once a week's games start, points already scored are locked in and only the players still to play are simulated, so odds move through the weekend. Betting locks whenever an NFL game is being played.</li>
         <li>The sportsbook is play money, for league fun only.</li></ul></div>`;
   }
 
@@ -324,8 +326,33 @@
     const since = ((pt.getDay() * 24 + pt.getHours() + pt.getMinutes() / 60) - 10 + 168) % 168;
     return { since, fresh: (now() - new Date(D.updated).getTime()) / 36e5 <= since - 38 };
   }
-  function bookStatus(market) {      // season-long markets pause while games are played; weekly ones close at Thursday kickoff
+  // ----- live week: betting locks while any NFL game has kicked off and is not yet final in the published data -----
+  const kickMs = x => Date.parse(x.kick);
+  const dayTime = ms => new Date(ms).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  function nflNow() {
+    const g = D.nfl && D.nfl.games; if (!g || !g.length || D.season_over) return null;
+    const t = now(), up = g.filter(x => t < kickMs(x)).sort((a, b) => kickMs(a) - kickMs(b));
+    return { n: g.length, final: g.filter(x => x.state === 'post').length, playing: g.filter(x => t >= kickMs(x) && x.state !== 'post'), next: up.length ? kickMs(up[0]) : null, kicked: g.length - up.length };
+  }
+  const playerLocked = p => !!(p && ((p.g && p.g !== 'pre') || (p.kick && now() >= Date.parse(p.kick))));
+  const legOpen = l => bookStatus(l.m).open && !(l.m === 'prop' && playerLocked(playerById(l.pid)));
+  function liveBar() {               // one line on how fresh the odds are and whether betting is open
+    const n = nflNow(), upd = dayTime(new Date(D.updated).getTime());
+    if (!n) return '';
+    const playing = n.playing.length, done = n.final === n.n;
+    const tag = playing ? '<b class="tag locked">Locked</b>' : done ? '<b class="tag">Week final</b>' : '<b class="tag open">Open</b>';
+    const games = playing ? `${playing} NFL game${playing === 1 ? ' is' : 's are'} being played, so betting is locked and these are the odds from the last update.` : done ? `All ${n.n} NFL games are final.` : `${n.final} of ${n.n} NFL games final.`;
+    const next = !playing && n.next ? ` Next kickoff ${dayTime(n.next)}; betting locks then.` : '';
+    return `<p class="livebar" role="status">${tag} <span>Odds updated ${upd}. ${games}${next}</span></p>`;
+  }
+  function bookStatus(market) {      // locked while games are played; open between games with the latest odds
     if (D.season_over) return { open: false, why: 'The season is over. Everything is settled.' };
+    const n = nflNow();
+    if (n) {
+      if (n.playing.length) return { open: false, locked: true, why: `Betting is locked while NFL games are being played (${n.playing.map(x => x.a + ' at ' + x.h).slice(0, 4).join(', ')}${n.playing.length > 4 ? ' and more' : ''}). You can still see the odds from the last update. Betting reopens when every game in progress is final and the odds have refreshed.` };
+      if (WEEKLY[market] && n.final === n.n) return { open: false, why: `Week ${D.week} is in the books. Next week's game, total and player bets open after Tuesday's update.` };
+      return { open: true };
+    }
     const c = ptClock();
     if (c.since < 38) return { open: false, why: 'Betting is paused while this week\'s games are played. It reopens Tuesday once the odds update.' };
     if (!c.fresh) return { open: false, why: 'Waiting for this week\'s odds update. Betting reopens as soon as it lands.' };
@@ -341,12 +368,28 @@
     const med = Math.sqrt(p.floor * p.ceil), sg = Math.log(p.ceil / p.floor) / 2.563;
     return { line: Math.floor(med) + 0.5, over: l => 1 - ncdf((Math.log(l) - Math.log(med)) / sg) };
   }
+  const QS = [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 99];
+  function totalOver(w, line) {      // chance a team's week score beats the line
+    const q = w.qs;
+    if (!q) return 1 - ncdf((line - w.mean) / Math.max(5, (w.p90 - w.p10) / 2.563));
+    if (q[q.length - 1] - q[0] < 0.05) return w.mean > line ? 1 : 0;       // nobody left to play
+    if (line < q[0]) return 0.995; if (line >= q[q.length - 1]) return 0.005;
+    let i = 0; while (q[i + 1] <= line) i++;
+    const f = q[i + 1] > q[i] ? (line - q[i]) / (q[i + 1] - q[i]) : 0;
+    return 1 - (QS[i] + f * (QS[i + 1] - QS[i])) / 100;
+  }
   function legProb(l) {              // model chance this pick wins right now; undefined when it can no longer be priced
     if (FUT[l.m]) { const p = D.teams[l.t] ? D.teams[l.t][l.m] : undefined; return p == null ? undefined : (l.s === 'yes' ? p : 1 - p); }
     if (l.w !== D.week) return undefined;
     if (l.m === 'game') { const g = D.games.find(x => x.week === l.w && (String(x.home) === String(l.t) || String(x.away) === String(l.t))); return g ? (String(g.home) === String(l.t) ? g.p_home : 1 - g.p_home) : undefined; }
-    if (l.m === 'total') { const w = D.week_scores[l.t]; if (!w) return undefined; const po = 1 - ncdf((l.line - w.mean) / Math.max(5, (w.p90 - w.p10) / 2.563)); return l.s === 'over' ? po : 1 - po; }
-    if (l.m === 'prop') { const pm = propModel(playerById(l.pid)); if (!pm) return undefined; const po = pm.over(l.line); return l.s === 'over' ? po : 1 - po; }
+    if (l.m === 'total') { const w = D.week_scores[l.t]; if (!w) return undefined; const po = totalOver(w, l.line); return l.s === 'over' ? po : 1 - po; }
+    if (l.m === 'prop') {
+      const p = playerById(l.pid); let po;
+      if (p && p.pts != null && p.pts > l.line) po = 1;                    // already over the line
+      else if (p && p.g === 'post' && p.pts != null) { if (p.pts === 0) return undefined; po = 0; }
+      else { const pm = propModel(p); if (!pm) return undefined; po = pm.over(l.line); }
+      return l.s === 'over' ? po : 1 - po;
+    }
   }
   function legResult(l) {            // 'win' | 'lose' | 'void' | null (still open)
     if (FUT[l.m]) { const o = D.outcomes && D.outcomes[l.m] ? D.outcomes[l.m][l.t] : undefined; return o === undefined ? null : ((l.s === 'yes') === !!o ? 'win' : 'lose'); }
@@ -410,13 +453,14 @@
     BOOK.slip.push(l);
     return swapped ? 'A parlay takes one pick per team and one side of each matchup, so your earlier pick was replaced.' : null;
   }
-  function slipQuote() { let q = 1; for (const l of BOOK.slip) { const x = legQuote(l); if (!x || !bookStatus(l.m).open) return null; q *= x; } return BOOK.slip.length ? q : null; }
-  function openSlip() {
+  function slipQuote() { let q = 1; for (const l of BOOK.slip) { const x = legQuote(l); if (!x || !legOpen(l)) return null; q *= x; } return BOOK.slip.length ? q : null; }
+  function openSlip(note) {
     const q = slipQuote(); if (!q || !BOOK.me) return;
     const w = wallet(BOOK.me), max = Math.floor(w.left), n = BOOK.slip.length;
     let dlg = $('#slip'); if (dlg) dlg.remove();
     dlg = document.createElement('dialog'); dlg.id = 'slip';
     dlg.innerHTML = `<form method="dialog"><h3>${n > 1 ? n + '-pick parlay' : 'Bet slip'}</h3>
+      ${typeof note === 'string' ? `<p class="note">${esc(note)}</p>` : ''}
       <ul class="legs">${BOOK.slip.map(l => `<li>${legText(l)} <span class="sub">${am(legQuote(l))}</span></li>`).join('')}</ul>
       <p class="sub">${n > 1 ? 'Every pick has to win. ' : ''}Price ${am(q)}. Betting as ${esc(T[BOOK.me].name)}.</p>
       ${max >= 1 ? `<label for="stake">Stake, up to ${money(max)}</label>
@@ -435,6 +479,10 @@
       const v = Math.floor(+inp.value || 0), err = $('#sliperr', dlg);
       if (v < 1 || v > max) { err.textContent = `Enter a whole-dollar stake from $1 to ${money(max)}.`; return; }
       place.disabled = true; place.textContent = 'Placing…';
+      await refresh();                                       // price the bet off the newest odds, never a stale page
+      const q2 = slipQuote();
+      if (!q2) { dlg.close(); viewBook('That bet was not placed: betting locked or a pick came off the board while you were looking.'); return; }
+      if (Math.abs(q2 - q) > 1e-9) { dlg.close(); await viewBook(); openSlip('The odds moved while you were looking. This is the new price.'); return; }
       try {
         const legs = BOOK.slip.map(l => Object.assign({}, l, { q: Math.round(legQuote(l) * 1e4) / 1e4 }));
         await saveRow({ kind: 'bet', bettor: +BOOK.me, stake: v, price: Math.round(q * 1e8) / 1e8, to_win: win(v), week: D.week, legs });
@@ -450,19 +498,23 @@
     if (!BOOK.cfg) { app.innerHTML = '<p class="loading">Opening the book…</p>'; await bookInit(); }
     const c = BOOK.cfg, m = BOOK.tab, st = bookStatus(m), w = BOOK.me ? wallet(BOOK.me) : null;
     const inSlip = l => BOOK.slip.some(x => legKey(x) === legKey(l));
-    const px = (l, label) => { const q = legQuote(l); return q && st.open ? `<button class="px ${l.s || 'yes'}" data-leg="${esc(JSON.stringify(l))}" aria-pressed="${inSlip(l)}"><span>${label}</span><b>${am(q)}</b><i>${Math.round(q * 100)}¢</i></button>` : `<span class="px off">${FUT[l.m] && D.outcomes && D.outcomes[l.m] ? ((l.s === 'yes') === !!D.outcomes[l.m][l.t] ? 'Won' : 'Lost') : 'Off'}</span>`; };
+    const px = (l, label, shut) => { const q = legQuote(l); if (q && (st.locked || shut === 'locked')) return `<span class="px locked"><span>${label}</span><b>${am(q)}</b><i>Locked</i></span>`; return q && st.open && !shut ? `<button class="px ${l.s || 'yes'}" data-leg="${esc(JSON.stringify(l))}" aria-pressed="${inSlip(l)}"><span>${label}</span><b>${am(q)}</b><i>${Math.round(q * 100)}¢</i></button>` : `<span class="px off">${FUT[l.m] && D.outcomes && D.outcomes[l.m] ? ((l.s === 'yes') === !!D.outcomes[l.m][l.t] ? 'Won' : 'Lost') : 'Off'}</span>`; };
     const gs = D.games.filter(g => g.week === D.week);
+    const live = Object.values(D.week_scores || {}).some(x => x.left != null);
     let table;
     if (m === 'game' || m === 'total') {
-      table = gs.length ? `<div class="scroll"><table class="book"><thead><tr><th class="l">Week ${D.week} game</th><th class="hm">Projected</th>${m === 'game' ? '<th>To win</th>' : '<th>Over</th><th>Under</th>'}</tr></thead><tbody>
-        ${gs.map(g => [[g.away, 1 - g.p_home, g.proj_away], [g.home, g.p_home, g.proj_home]].map(([id, p, pr], k) => { const ln = totalLine(id); return `<tr class="${k ? 'pair-end' : ''}"><td class="l">${teamLink(id)}${m === 'game' ? `<span class="sub"> ${pct(p, 0)}</span>` : ''}</td><td class="hm">${pr.toFixed(1)}</td>${m === 'game' ? `<td>${px({ m: 'game', t: +id, w: D.week, s: 'yes' }, 'Win')}</td>` : `<td>${px({ m: 'total', t: +id, w: D.week, s: 'over', line: ln }, 'O ' + ln)}</td><td>${px({ m: 'total', t: +id, w: D.week, s: 'under', line: ln }, 'U ' + ln)}</td>`}</tr>`; }).join('')).join('')}
+      table = gs.length ? `<div class="scroll"><table class="book"><thead><tr><th class="l">Week ${D.week} game</th><th class="hm">${live ? 'So far' : ''}</th><th class="hm">Projected</th>${m === 'game' ? '<th>To win</th>' : '<th>Over</th><th>Under</th>'}</tr></thead><tbody>
+        ${gs.map(g => [[g.away, 1 - g.p_home, g.proj_away], [g.home, g.p_home, g.proj_home]].map(([id, p, pr], k) => { const ln = totalLine(id), ws = D.week_scores[id] || {}, on = ws.left != null && (ws.pts !== 0 || ws.left === 0 || ws.playing > 0), fin = on && ws.left === 0 && !ws.playing;
+          return `<tr class="${k ? 'pair-end' : ''}"><td class="l">${teamLink(id)}${m === 'game' ? `<span class="sub"> ${pct(p, 0)}</span>` : ''}${on ? `<span class="sub prog"> ${ws.pts.toFixed(1)} so far, ${ws.left ? ws.left + ' to play' : 'done'}</span>` : ''}</td><td class="hm">${on ? ws.pts.toFixed(1) + (ws.left ? ` <span class="sub">${ws.left} to play</span>` : ' <span class="sub">done</span>') : ''}</td><td class="hm">${pr.toFixed(1)}</td>${m === 'game' ? `<td>${px({ m: 'game', t: +id, w: D.week, s: 'yes' }, 'Win')}</td>` : fin ? `<td colspan="2"><span class="px off wide">Final: ${ws.pts.toFixed(1)} points</span></td>` : `<td>${px({ m: 'total', t: +id, w: D.week, s: 'over', line: ln }, 'O ' + ln)}</td><td>${px({ m: 'total', t: +id, w: D.week, s: 'under', line: ln }, 'U ' + ln)}</td>`}</tr>`; }).join('')).join('')}
         </tbody></table></div>` : '<p class="empty">No games on the board this week.</p>';
     } else if (m === 'prop') {
       BOOK.propTeam = BOOK.propTeam || BOOK.me || ids[0];
       const ps = D.players.filter(p => String(p.team) === BOOK.propTeam && p.wk >= 4).sort((a, b) => b.wk - a.wk);
       table = `<div class="row"><label for="pt" class="sub">Players on</label><select class="pick" id="pt">${ids.map(t => `<option value="${t}" ${t === BOOK.propTeam ? 'selected' : ''}>${esc(T[t].name)}</option>`).join('')}</select></div>
         ${ps.length ? `<div class="scroll"><table class="book"><thead><tr><th class="l">Player, fantasy points in week ${D.week}</th><th class="hm">Projected</th><th>Over</th><th>Under</th></tr></thead><tbody>
-        ${ps.map(p => { const pm = propModel(p), base = { m: 'prop', pid: p.id, name: p.name, ft: +p.team, w: D.week, line: pm.line }; return `<tr><td class="l"><b>${esc(p.name)}</b> <span class="sub">${p.pos}, ${esc(p.nfl)}${p.opp ? ' vs ' + esc(p.opp) : ''}</span></td><td class="hm">${p.wk.toFixed(1)}</td><td>${px(Object.assign({ s: 'over' }, base), 'O ' + pm.line)}</td><td>${px(Object.assign({ s: 'under' }, base), 'U ' + pm.line)}</td></tr>`; }).join('')}
+        ${ps.map(p => { const pm = propModel(p), base = { m: 'prop', pid: p.id, name: p.name, ft: +p.team, w: D.week, line: pm.line }, gone = playerLocked(p);
+          const cells = gone ? `<td colspan="2"><span class="px off wide">${p.g === 'post' && p.pts != null ? `Final: ${p.pts.toFixed(1)} points${p.on === false ? ' (on the bench)' : ''}` : p.pts != null && p.g === 'in' ? `Playing now: ${p.pts.toFixed(1)} so far` : 'Game under way'}</span></td>` : `<td>${px(Object.assign({ s: 'over' }, base), 'O ' + pm.line)}</td><td>${px(Object.assign({ s: 'under' }, base), 'U ' + pm.line)}</td>`;
+          return `<tr><td class="l"><b>${esc(p.name)}</b> <span class="sub">${p.pos}, ${esc(p.nfl)}${p.opp ? ' vs ' + esc(p.opp) : ''}${p.kick && !gone ? ', ' + dayTime(Date.parse(p.kick)) : ''}</span></td><td class="hm">${p.wk.toFixed(1)}</td>${cells}</tr>`; }).join('')}
         </tbody></table></div>` : '<p class="empty">No players to bet on for this team this week.</p>'}`;
     } else {
       const rows = ids.map(id => ({ id, p: D.teams[id][m] })).sort((a, b) => b.p - a.p);
@@ -474,18 +526,19 @@
     const recent = BOOK.bets.slice(-12).reverse();
     const futOpen = bookStatus('title').open, sq = slipQuote();
     const cls = v => v > 0.005 ? 'up' : v < -0.005 ? 'down' : '';
-    const hint = { game: 'Pick a team to win its matchup. A tie returns your stake.', total: 'Bet on a team scoring over or under its line this week.', prop: 'Bet on a player\'s fantasy points this week. If he does not play, the pick is no action.' }[m] || 'Yes pays if it happens, No pays if it does not.';
+    const hint = { game: 'Pick a team to win its matchup. A tie returns your stake.', total: 'Bet on a team scoring over or under its line this week.', prop: 'Bet on a player\'s fantasy points this week, any time before his game kicks off. If he does not play, the pick is no action.' }[m] || 'Yes pays if it happens, No pays if it does not.';
     app.innerHTML = `<h1>Sportsbook</h1>
       <p class="lede">Paper trading for bragging rights. Every team has a ${money(c.credit_limit)} credit line and no limit on any single bet. Tap prices to build a bet; two or more picks make a parlay.</p>
       ${flash ? `<p class="flash" role="status">${esc(flash)}</p>` : ''}
       ${BOOK.error ? `<p class="note">${BOOK.error}</p>` : ''}
       ${!BOOK.remote ? '<p class="note">Preview mode: bets are saved in this browser only. Once the shared ledger is connected, everyone will see the same bets.</p>' : ''}
-      ${!st.open ? `<p class="note">${st.why}</p>` : ''}
+      ${liveBar()}
+      ${!st.open && !(st.locked && nflNow()) ? `<p class="note">${st.why}</p>` : ''}
       <div class="wallet"><label for="me">Betting as</label><select class="pick" id="me"><option value="">Pick your team</option>${ids.map(t => `<option value="${t}" ${t === BOOK.me ? 'selected' : ''}>${esc(T[t].name)}</option>`).join('')}</select>
         ${w ? `<div><b>${money(Math.max(0, w.left))}</b><span>Credit left</span></div><div><b class="${cls(w.total)}">${money(w.total, true)}</b><span>Profit and loss</span></div><div><b>${money(w.risk)}</b><span>Open stakes</span></div><div><b>${money(w.value)}</b><span>Open bets worth now</span></div>` : '<span class="sub">Pick your team to place bets.</span>'}</div>
       <div class="row"><div class="seg" role="group" aria-label="Market">${Object.entries(TABS).map(([k, v]) => `<button data-m="${k}" aria-pressed="${k === m}">${v}</button>`).join('')}</div></div>
       ${table}
-      <p class="sub">${hint} Prices include the house's cut and are locked in when you place the bet.</p>
+      <p class="sub">${hint} Prices include the house's cut and are locked in when you place the bet. Odds refresh through the weekend as games finish; betting is locked whenever a game is being played.</p>
       ${w ? `<h2>My bets</h2>${w.mine.length ? `<div class="scroll"><table class="mybets"><thead><tr><th class="l">Bet</th><th>Stake</th><th>To win</th><th>Worth now</th><th>Result</th></tr></thead><tbody>
         ${w.mine.slice().reverse().map(b => { const r = settle(b), cv = cashValue(b); return `<tr><td class="l">${betText(b)} <span class="sub">${am(b.price)}, placed week ${b.week}</span></td><td>${money(b.stake)}</td><td>${money(b.to_win)}</td>
           <td>${r === null ? `${money(markValue(b))}` : '–'}</td><td>${r === null ? (cv != null && futOpen ? `<button class="chipbtn cash" data-id="${b.id}" data-v="${cv}">Cash out ${money(cv)}</button>` : '<span class="sub">Open</span>') : `<b class="${cls(r)}">${money(r, true)}</b>${b.cashed != null ? ' <span class="sub">cashed out</span>' : ''}`}</td></tr>`; }).join('')}
@@ -501,7 +554,7 @@
     const pt = $('#pt'); if (pt) pt.addEventListener('change', e => { BOOK.propTeam = e.target.value; viewBook(); });
     const bk = app.querySelector('.book'); if (bk) bk.addEventListener('click', e => { const b = e.target.closest('button.px'); if (!b) return; const y = scrollY, msg = toggleLeg(JSON.parse(b.dataset.leg)); viewBook(msg || undefined).then(() => scrollTo(0, msg ? 0 : y)); });
     if ($('#clr')) $('#clr').addEventListener('click', () => { BOOK.slip = []; viewBook(); });
-    if ($('#rev')) $('#rev').addEventListener('click', openSlip);
+    if ($('#rev')) $('#rev').addEventListener('click', () => openSlip());
     const mb = app.querySelector('.mybets'); if (mb) mb.addEventListener('click', async e => {
       const b = e.target.closest('button.cash'); if (!b) return;
       if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = `Confirm ${money(+b.dataset.v)}`; return; }
@@ -602,14 +655,31 @@
   // ---------- shell ----------
   $('#league-name').textContent = D.league.name + ' Odds';
   document.title = D.league.name + ' Odds Board';
-  const when = new Date(D.updated);
-  $('#stamp').textContent = `Updated ${when.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}. ${D.sims.toLocaleString('en-US')} simulated seasons. Sources: ${D.sources.join(', ')}.`;
+  const stamp = () => { $('#stamp').textContent = `Updated ${new Date(D.updated).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}. ${D.sims.toLocaleString('en-US')} simulated seasons. Sources: ${D.sources.join(', ')}.`; };
+  stamp();
+  async function refresh() {         // pick up a newer odds file without a reload; true when the data changed
+    try { const j = await fetch('data/latest.json?t=' + Date.now()).then(r => r.ok ? r.json() : null); if (j && j.updated !== D.updated) { D = j; stamp(); return true; } } catch (e) {}
+    return false;
+  }
+  const lockSig = () => { const n = nflNow(); return n ? n.kicked + ':' + n.playing.length : ''; };
+  let lastSig = lockSig();
+  async function tick() {
+    if (document.hidden) return;
+    const changed = await refresh(), sig = lockSig();
+    if (!changed && sig === lastSig) return;
+    lastSig = sig;
+    const sec = (location.hash || '#/').split('/')[1] || '';
+    if (!['', 'book', 'week'].includes(sec) || document.querySelector('dialog[open]')) return;
+    const y = scrollY; await route(); scrollTo(0, y);
+  }
+  setInterval(tick, 60000);
+  document.addEventListener('visibilitychange', tick);
   if (D.sample) { const b = $('#banner'); b.hidden = false; b.textContent = 'Sample data: team names and early results are real, but players and current odds are placeholders until the first live update runs.'; }
   function route() {
     const [, sec, arg] = (location.hash || '#/').split('/');
     const name = sec === 'team' ? 'teams' : (sec || 'board');
     document.querySelectorAll('nav a').forEach(a => a.dataset.nav === name ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
-    ({ week: viewWeek, teams: viewTeams, team: () => viewTeam(arg), players: viewPlayers, about: viewAbout, book: () => viewBook(), scenarios: viewScenarios }[sec] || viewBoard)();
+    return ({ week: viewWeek, teams: viewTeams, team: () => viewTeam(arg), players: viewPlayers, about: viewAbout, book: () => viewBook(), scenarios: viewScenarios }[sec] || viewBoard)();
   }
   addEventListener('hashchange', () => { route(); scrollTo(0, 0); });
   route();

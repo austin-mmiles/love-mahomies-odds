@@ -184,3 +184,15 @@ td .legs { font-size: .92rem; white-space: normal; }
 .seedgrid .cut { border-right: 3px solid var(--gold); }
 .seedgrid tr.is-on td.l { background: var(--hi); }
 .chipbtn:disabled { opacity: .45; cursor: default; }
+
+/* live week: freshness line and locked prices */
+.livebar { margin: 0 0 14px; line-height: 1.7; font-size: .95rem; color: var(--muted); max-width: 90ch; }
+.tag { font: 700 .95rem/1 var(--display); padding: 4px 9px; margin-right: 6px; display: inline-block; border-radius: 4px; background: var(--rule); color: var(--ink); }
+.tag.open { background: var(--board); color: var(--board-ink); }
+.tag.locked { background: var(--gold); color: #1c1a12; }
+.px.locked { cursor: not-allowed; border-style: dashed; background: transparent; }
+.px.locked b { opacity: .75; }
+.px.off.wide { min-width: 216px; }
+.prog { display: none; }
+@media (max-width: 720px) { .prog { display: block; margin-left: 20px; } .px.off.wide { min-width: 0; }
+  .book td.l { white-space: normal; min-width: 104px; } .book th, .book td { padding: 8px 6px; } .book .px { min-width: 78px; padding: 6px 6px; column-gap: 5px; } }

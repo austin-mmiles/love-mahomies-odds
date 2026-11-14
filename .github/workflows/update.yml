@@ -1,9 +1,10 @@
 name: Update odds
 
+# Wakes up every 10 minutes and asks pipeline/live.py whether anything changed: a game kicked off, is being
+# played, or just went final, or the last update is more than 3 hours old. Otherwise it stops after a few seconds.
 on:
   schedule:
-    - cron: "17 13 * * *"   # every day, 5:17 am Pacific (standard time)
-    - cron: "17 19 * * 2"   # Tuesdays again at 11:17 am Pacific, after ESPN finalizes the week
+    - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
       rebuild:
@@ -21,21 +22,38 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Is an update needed?
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            python3 -m pipeline.live --need docs/data/latest.json
+          fi
       - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'true'
         with:
           python-version: "3.12"
-      - run: pip install numpy pandas
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - if: steps.gate.outputs.run == 'true'
+        run: pip install -r requirements.txt
       - name: Run the model
+        if: steps.gate.outputs.run == 'true'
         env:
           ESPN_S2: ${{ secrets.ESPN_S2 }}
           ESPN_SWID: ${{ secrets.ESPN_SWID }}
         run: python -m pipeline.run ${{ inputs.rebuild && '--rebuild' || '' }}
       - name: Publish new data
+        if: steps.gate.outputs.run == 'true'
         run: |
           git config user.name "odds-bot"
           git config user.email "odds-bot@users.noreply.github.com"
           git add docs/data
-          git diff --cached --quiet || git commit -m "Update odds"
+          git diff --cached --quiet && exit 0
+          git commit -m "Update odds"
+          git pull --rebase
           git push

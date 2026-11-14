@@ -45,11 +45,15 @@ def has_game(L, pro, w):
     return w in (L["pro"].get(pro, {}).get("opp") or {})
 
 
-def players_live(L, W, sleeper, cal, X=None):
-    """Current rosters; each week's expectation blends ESPN, Sleeper, the usage model and (this week) props."""
+def players_live(L, W, sleeper, cal, X=None, nfl=None):
+    """Current rosters; each week's expectation blends ESPN, Sleeper, the usage model and (this week) props.
+    nfl = {NFL team: its game this week}. A player whose game has kicked off is locked: his lineup slot and the
+    points he has so far come from this week's box score."""
     from .sleeper import key as skey
     from .blend import props_points, PROPS_WEIGHT, PRIOR
     X = X or {}
+    nfl = nfl or {}
+    box = {x["pid"]: x for ents in L["box"].get(W, {}).values() for x in ents}
     out = []
     for t, ents in L["future"][W].items():
         for e in ents:
@@ -91,8 +95,14 @@ def players_live(L, W, sleeper, cal, X=None):
                         m = (1 - PROPS_WEIGHT) * m + PROPS_WEIGHT * pp
                     src = {a: round(v, 1) for a, v in parts.items()}
                 mean[w] = m * cal.get(pos, .95)
+            g, lock = nfl.get(ab), None
+            if g and g["state"] != "pre":
+                b = box.get(e["pid"]) or e
+                lock = {"pts": float(b["act"]), "left": float(g.get("left", 0.0)) if g["state"] == "in" else 0.0,
+                        "slot": b["slot"], "start": b["slot"] not in (C.BENCH_SLOT, C.IR_SLOT)}
             out.append(dict(e, team=t, mean=mean, play_prob=C.PLAY_PROB.get(e["inj"], 1.0), sources=src,
-                            vol=(X.get("vol") or {}).get(e["pid"], 1.0)))
+                            vol=(X.get("vol") or {}).get(e["pid"], 1.0), lock=lock,
+                            gstate=g["state"] if g else None, kick=g.get("kick") if g else None))
     return out
 
 
@@ -135,7 +145,8 @@ def _slot_counts(slots):
     return n, slots.get(C.FLEX_SLOT, 0)
 
 
-def simulate(L, W, players, frm, n_sims, seed=0):
+def simulate(L, W, players, frm, n_sims, seed=0, week_closed=False):
+    """week_closed: every NFL game of week W has kicked off, so no lineup spot can still be filled."""
     rng = np.random.default_rng(seed)
     T = sorted(L["teams"]); ti = {t: i for i, t in enumerate(T)}; nT = len(T)
     N, P = n_sims, len(players)
@@ -151,6 +162,9 @@ def simulate(L, W, players, frm, n_sims, seed=0):
     dur_v = np.array([d for d, _ in C.INJ_DURATIONS]); dur_p = np.array([p for _, p in C.INJ_DURATIONS])
     haz = np.array([C.HAZARD.get(int(x), 0) for x in pos])
     max_pro = max([35] + list(L["pro"])) + 1
+    locks = [p.get("lock") for p in players]             # this week's players whose NFL game has kicked off
+    nslots = sum(npos.values()) + nflex
+    week_live = {}
 
     scores = np.zeros((last + 2, N, nT), dtype=np.float32)
     for g in L["games"]:                       # weeks already played
@@ -168,16 +182,51 @@ def simulate(L, W, players, frm, n_sims, seed=0):
             if (pp < 1).any():
                 avail &= rng.random((N, P)) < pp[None, :]
         var_t = C.TALENT0 ** 2 + C.DRIFT ** 2 * (w - W)
+        def draw(m, p_, i):                                  # one week of points for player i (-1 = a free agent)
+            a = C.LOAD[p_]
+            e = rng.standard_normal(N).astype(np.float32)
+            if p_ == 16:
+                opp = L["pro"].get(int(pro[i]), {}).get("opp", {}).get(w, 0) if i >= 0 else 0
+                z = (-a * O[:, opp] if i >= 0 else 0) + (math.sqrt(1 - a * a) if i >= 0 else 1) * e
+                return m + C.DST_SD * z
+            z = a * O[:, int(pro[i])] + math.sqrt(1 - a * a) * e if i >= 0 else e
+            mm = m * np.exp(tal[:, i] - var_t / 2) if i >= 0 else m
+            sg = sig[p_] if i < 0 or vol[i] == 1.0 else math.sqrt(math.log(1 + (C.CV[p_] * vol[i]) ** 2))
+            return mm * np.exp(sg * z - sg ** 2 / 2)
+
         for t in range(nT):
-            idx = [i for i in np.where(team == t)[0] if mw[i] > 0]
+            mine = np.where(team == t)[0]
+            cnt = {p_: np.zeros(N, dtype=np.int8) for p_ in npos}
+            flex = np.zeros(N, dtype=np.int8)
+            tot = np.zeros(N, dtype=np.float32)
+            open_share = 1.0
+            if w == W and any(locks[i] for i in mine):       # games already kicked off: those lineup spots are set
+                banked, started, playing, done = 0.0, 0, 0, 0.0
+                for i in mine:
+                    lk = locks[i]
+                    if not lk or not lk["start"]:
+                        continue
+                    p_ = int(pos[i])
+                    if lk["slot"] == C.FLEX_SLOT and nflex:
+                        flex += 1
+                    elif p_ in cnt:
+                        cnt[p_] += 1
+                    banked += lk["pts"]; started += 1; done += 1 - lk["left"]
+                    if lk["left"] > 0:
+                        playing += 1
+                        if mw[i] > 0:
+                            tot += lk["left"] * np.maximum(draw(mw[i], p_, i), 0)
+                tot += banked
+                open_share = max(0.0, 1 - done / max(1, nslots))
+                week_live[T[t]] = {"pts": round(banked, 2), "left": max(0, nslots - started), "playing": playing}
+            idx = [i for i in mine if mw[i] > 0 and not (w == W and locks[i])]
             cands = [(mw[i], int(pos[i]), i) for i in idx]
             for p_, c in npos.items():
                 cands += [(C.REPLACEMENT[p_], p_, -1)] * c
             cands += [(C.REPLACEMENT[2], 2, -1), (C.REPLACEMENT[3], 3, -1)][:nflex]
             cands.sort(key=lambda x: -x[0])
-            cnt = {p_: np.zeros(N, dtype=np.int8) for p_ in npos}
-            flex = np.zeros(N, dtype=np.int8)
-            tot = np.zeros(N, dtype=np.float32)
+            if w == W and week_closed:
+                cands = []
             for m, p_, i in cands:
                 av = avail[:, i] if i >= 0 else np.ones(N, dtype=bool)
                 take = av & (cnt[p_] < npos[p_])
@@ -188,19 +237,8 @@ def simulate(L, W, players, frm, n_sims, seed=0):
                     take = take | tf
                 if not take.any():
                     continue
-                a = C.LOAD[p_]
-                e = rng.standard_normal(N).astype(np.float32)
-                if p_ == 16:
-                    opp = L["pro"].get(int(pro[i]), {}).get("opp", {}).get(w, 0) if i >= 0 else 0
-                    z = (-a * O[:, opp] if i >= 0 else 0) + (math.sqrt(1 - a * a) if i >= 0 else 1) * e
-                    pts = m + C.DST_SD * z
-                else:
-                    z = a * O[:, int(pro[i])] + math.sqrt(1 - a * a) * e if i >= 0 else e
-                    mm = m * np.exp(tal[:, i] - var_t / 2) if i >= 0 else m
-                    sg = sig[p_] if i < 0 or vol[i] == 1.0 else math.sqrt(math.log(1 + (C.CV[p_] * vol[i]) ** 2))
-                    pts = mm * np.exp(sg * z - sg ** 2 / 2)
-                tot += np.where(take, pts, 0)
-            scores[w, :, t] = tot + frm.get(T[t], 0.0) + C.TEAM_SD * rng.standard_normal(N)
+                tot += np.where(take, draw(m, p_, i), 0)
+            scores[w, :, t] = tot + open_share * (frm.get(T[t], 0.0) + C.TEAM_SD * rng.standard_normal(N))
         played = avail & (haz > 0)[None, :]
         hurt = played & (rng.random((N, P)) < haz[None, :])
         if hurt.any():
@@ -262,12 +300,15 @@ def simulate(L, W, players, frm, n_sims, seed=0):
     if W <= last:
         s = scores[W]
         q = np.percentile(s, [10, 50, 90], axis=0)
-        res["week_scores"] = {t: {"mean": float(s[:, ti[t]].mean()), "p10": float(q[0, ti[t]]), "p50": float(q[1, ti[t]]),
-                                  "p90": float(q[2, ti[t]])} for t in T}
+        qs = np.percentile(s, QS, axis=0)                    # the whole spread, so the site can price any line
+        res["week_scores"] = {t: dict({"mean": float(s[:, ti[t]].mean()), "p10": float(q[0, ti[t]]), "p50": float(q[1, ti[t]]),
+                                       "p90": float(q[2, ti[t]]), "qs": [round(float(x), 1) for x in qs[:, ti[t]]]},
+                                      **week_live.get(t, {})) for t in T}
         res["h2h"] = {t: {u: (None if t == u else round(float((s[:, ti[t]] > s[:, ti[u]]).mean()), 4)) for u in T} for t in T}
     return res
 
 
+QS = [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 99]
 BOOM = {1: 25, 2: 20, 3: 20, 4: 15, 5: 12, 16: 12}     # a week that usually lands in the position's top tier
 BUST = {1: 12, 2: 7, 3: 7, 4: 5, 5: 5, 16: 2}
 
@@ -322,6 +363,10 @@ def player_outlook(L, W, players, X=None):
             "tgt_delta": None if tr.get("tgt_delta") is None else round(tr["tgt_delta"], 3),
             "ros_avg": round(sum(games) / len(games), 1) if games else 0.0, "ros_total": round(sum(wk), 1),
             "ros_games": len(games), "weeks": wk, "season_pts": p.get("season_pts"),
+            # this week's NFL game: pre / in / post, kickoff, and points so far once it has started
+            "g": p.get("gstate"), "kick": p.get("kick"),
+            "pts": round(p["lock"]["pts"], 2) if p.get("lock") else None,
+            "on": bool(p["lock"]["start"]) if p.get("lock") else None,
         })
     for pos in set(r["pos"] for r in rows):
         grp = sorted([r for r in rows if r["pos"] == pos], key=lambda r: -r["ros_total"])

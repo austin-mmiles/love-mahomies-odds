@@ -23,6 +23,7 @@ Live at https://austin-mmiles.github.io/love-mahomies-odds/ and served from `doc
 | `pipeline/odds.py` | DraftKings lines via ESPN's public odds feed: game totals/spreads and player props. |
 | `pipeline/blend.py` | Fits source weights by backtest each run; Vegas multipliers; props-based projection. |
 | `pipeline/model.py` | Monte Carlo season simulator and per-player outlook. |
+| `pipeline/live.py` | NFL scoreboard (kickoffs, game states) for in-week odds; also the gate that decides if a scheduled run is needed. |
 | `pipeline/config.py` | League id and all model constants. |
 | `docs/` | Static site (`index.html`, `app.js`, `style.css`), no build step. |
 | `docs/data/latest.json`, `history.json` | Current snapshot and one frozen snapshot per week. |
@@ -30,7 +31,7 @@ Live at https://austin-mmiles.github.io/love-mahomies-odds/ and served from `doc
 | `docs/book-config.json` | Sportsbook limits and the Supabase connection (blank = preview mode). |
 | `setup/supabase.sql` | One-time script that creates the shared bet ledger. |
 | `tests/make_fixtures.py` | Builds ESPN-format sample data so the pipeline runs with no network. |
-| `.github/workflows/update.yml` | Daily update, plus Tuesday after the week finalizes. |
+| `.github/workflows/update.yml` | Wakes every 10 minutes; runs the model only when `pipeline.live --need` says something changed. |
 
 ## League facts the model depends on
 
@@ -57,13 +58,28 @@ Live at https://austin-mmiles.github.io/love-mahomies-odds/ and served from `doc
   each team's score, over/under on each player's fantasy points. Lines sit at the model's median.
 - Parlays: tap several prices to combine up to 8 picks (one per fantasy team, one side per matchup). Price is the
   product of the leg prices. A voided leg (tie, player did not play) drops out and the rest still count.
-- House takes the other side at model price plus 8% vig. Season-long markets pause Sunday 10 am PT until the Tuesday
-  odds update; weekly markets close Thursday 5:15 pm PT.
+- House takes the other side at model price plus 8% vig.
+- Live week: every market (season-long too) is locked while any NFL game has kicked off and is not yet final in
+  `latest.json` (`nfl.games`); prices stay visible, marked Locked. Between games everything reopens at the refreshed
+  odds. A player prop closes for good at that player's kickoff. Weekly markets close once all games are final.
+  If `nfl` is missing the site falls back to the old clock rule (weekly closes Thursday 5:15 pm PT).
+- The site re-reads `latest.json` every minute and re-prices a bet slip against the newest file before saving.
 - Open bets are marked to the latest odds; single season-long bets can be cashed out (fair value less the vig).
 - Leaderboard ranks by profit and loss (settled plus open-bet value) and shows return per dollar staked.
 - Settlement reads `outcomes` (futures), `results` (games, totals) and `player_points` (props) in `latest.json`.
 - Storage: Supabase table `bets` (insert + read only; `legs` is a JSON array; cash-outs are rows with
   `kind = 'cashout'`). Until `docs/book-config.json` has the URL and anon key, bets stay in the visitor's browser.
+
+## In-week (live) odds
+
+- `pipeline/live.py` reads ESPN's public NFL scoreboard. For the current week, a player whose game has kicked off is
+  locked: his lineup slot and points so far come from this week's box score; benched players are out. Remaining
+  lineup spots are filled by best projection from players yet to play. Team noise scales with the share still to play.
+- `week_scores[team]` carries `qs` (21 quantiles, used to price any total line), plus `pts`/`left`/`playing` once
+  that team has locked players. Player rows carry `g` (pre/in/post), `kick`, `pts`, `on` (started).
+- The week's history snapshot freezes at first kickoff, so the trend chart stays "odds going into the week".
+- Schedule gate: run when a game is in progress, a game changed state, a kickoff passed, the NFL week rolled, or
+  the last update is over 3 hours old. Test with `--scoreboard FILE --now 2026-11-15T19:00Z`.
 
 ## Playoff picture (scenario simulator)
 
@@ -77,6 +93,8 @@ Live at https://austin-mmiles.github.io/love-mahomies-odds/ and served from `doc
 
 - [x] ESPN secrets added 2026-11-14; first live run succeeded with ESPN, Sleeper, nflverse and DraftKings lines.
 - [x] Supabase connected 2026-11-14 (project `vucqnkvqbjigahawrkdf`, `setup/supabase.sql` applied, publishable key in `docs/book-config.json`); bets are shared across devices.
+- [x] Live in-week odds and game-time betting locks added 2026-11-14; tested on real Week 10 data with simulated
+  kickoff times. Not yet watched through a real Sunday: check the first live window (lock, unlock, run cadence).
 - [ ] Playoff weeks (15-17) are tested on sample data only; recheck when ESPN posts the bracket.
 - Ideas: FantasyPros source (needs login), archived-props backtest, weather for December games.
 
