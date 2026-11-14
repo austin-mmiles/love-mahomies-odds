@@ -1,0 +1,41 @@
+name: Update odds
+
+on:
+  schedule:
+    - cron: "17 13 * * *"   # every day, 5:17 am Pacific (standard time)
+    - cron: "17 19 * * 2"   # Tuesdays again at 11:17 am Pacific, after ESPN finalizes the week
+  workflow_dispatch:
+    inputs:
+      rebuild:
+        description: "Rebuild every past week's history"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-odds
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy
+      - name: Run the model
+        env:
+          ESPN_S2: ${{ secrets.ESPN_S2 }}
+          ESPN_SWID: ${{ secrets.ESPN_SWID }}
+        run: python -m pipeline.run ${{ inputs.rebuild && '--rebuild' || '' }}
+      - name: Publish new data
+        run: |
+          git config user.name "odds-bot"
+          git config user.email "odds-bot@users.noreply.github.com"
+          git add docs/data
+          git diff --cached --quiet || git commit -m "Update odds"
+          git push

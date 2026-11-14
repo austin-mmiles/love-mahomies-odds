@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Love Mahomies Odds Board</title>
+<meta name="description" content="Title, playoff and matchup odds for the Love Mahomies fantasy league, updated through the season.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="mast">
+  <a class="brand" href="#/"><span class="brand-mark" aria-hidden="true"></span><span id="league-name">Odds Board</span></a>
+  <nav aria-label="Sections">
+    <a href="#/" data-nav="board">Board</a>
+    <a href="#/week" data-nav="week">Matchups</a>
+    <a href="#/teams" data-nav="teams">Teams</a>
+    <a href="#/players" data-nav="players">Players</a>
+    <a href="#/about" data-nav="about">How it works</a>
+  </nav>
+  <label class="vig">Prices
+    <select id="vig" aria-label="Odds pricing">
+      <option value="0">Fair</option>
+      <option value="0.1">10% vig</option>
+      <option value="0.2">20% vig</option>
+    </select>
+  </label>
+</header>
+<div id="banner" hidden></div>
+<main id="app" tabindex="-1"><p class="loading">Loading the board…</p></main>
+<footer><span id="stamp"></span></footer>
+<script src="app.js"></script>
+</body>
+</html>
