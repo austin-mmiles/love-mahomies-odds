@@ -21,25 +21,24 @@ def fit_weights(L, W, adv, sleeper_hist=None, log=print):
     from .sleeper import key as skey
     report = {"weeks": [], "by_pos": {}}
     rows = []
-    if adv is not None and adv.ok:
-        for w in range(3, min(W, C.LAST_WEEK + 1)):
-            if w not in L["box"]:
-                continue
-            U = adv.usage(w); seen = set(); sw = (sleeper_hist or {}).get(w) or {}
-            for ents in L["box"][w].values():
-                for e in ents:
-                    if e["pos"] not in (1, 2, 3, 4) or e["proj"] <= 3 or e["pid"] in seen:
-                        continue
-                    seen.add(e["pid"])
-                    u = U.get(e["pid"])
-                    sl = sw.get(skey(e["name"], e["pos"], L["pro"].get(e["pro"], {}).get("abbrev", ""))) if e["name"] else None
-                    rows.append((w, e["pos"], e["proj"], sl if sl and sl > 0.3 else np.nan,
-                                 u["pts"] if u and not u["stale"] else np.nan, e["act"]))
-            report["weeks"].append(w)
+    for w in range(3, min(W, C.LAST_WEEK + 1)):
+        if w not in L["box"]:
+            continue
+        U = (adv.usage(w) if adv is not None and adv.ok else {}); seen = set(); sw = (sleeper_hist or {}).get(w) or {}
+        for ents in L["box"][w].values():
+            for e in ents:
+                if e["pos"] not in C.POS or e["proj"] <= (1.5 if e["pos"] in (5, 16) else 3) or e["pid"] in seen:
+                    continue
+                seen.add(e["pid"])
+                u = U.get(e["pid"])
+                sl = sw.get(skey(e["name"], e["pos"], L["pro"].get(e["pro"], {}).get("abbrev", ""))) if e["name"] else None
+                rows.append((w, e["pos"], e["proj"], sl if sl is not None and sl > 0.3 else np.nan,
+                             u["pts"] if u and not u["stale"] else np.nan, e["act"]))
+        report["weeks"].append(w)
     R = np.array(rows, dtype=float) if rows else np.zeros((0, 6))
     weights = {}
     names = ["espn", "sleeper", "usage"]
-    for pos in (1, 2, 3, 4):
+    for pos in (1, 2, 3, 4, 5, 16):
         r = R[R[:, 1] == pos]
         avail = [n for i, n in enumerate(names) if len(r) and np.isfinite(r[:, 2 + i]).mean() > 0.6]
         if "espn" not in avail:

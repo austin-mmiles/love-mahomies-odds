@@ -65,6 +65,8 @@ def players_live(L, W, sleeper, cal, X=None, nfl=None):
             u = (X.get("usage") or {}).get(e["pid"])
             vm = (X.get("vm") or {}).get(ab, 1.0)
             wts = (X.get("weights") or {}).get(pos) or {"espn": C.ESPN_SHARE[pos], "sleeper": 1 - C.ESPN_SHARE[pos]}
+            if u is None and (X.get("weights") or {}).get(pos):
+                wts = {a: v for a, v in wts.items() if a != "usage"}  # K/D-ST: the fit has no usage column for them
             mean, src = np.zeros(C.LAST_WEEK + 2), {}
             for w in range(W, C.LAST_WEEK + 1):
                 fe = next((x for x in L["future"].get(w, {}).get(t, []) if x["pid"] == e["pid"]), None)
