@@ -76,7 +76,7 @@ Live at https://austin-mmiles.github.io/love-mahomies-odds/ and served from `doc
 ## Status and open items (update this section as things change)
 
 - [x] ESPN secrets added 2026-11-14; first live run succeeded with ESPN, Sleeper, nflverse and DraftKings lines.
-- [ ] Supabase project not yet created; sportsbook is in preview mode.
+- [x] Supabase connected 2026-11-14 (project `vucqnkvqbjigahawrkdf`, `setup/supabase.sql` applied, publishable key in `docs/book-config.json`); bets are shared across devices.
 - [ ] Playoff weeks (15-17) are tested on sample data only; recheck when ESPN posts the bracket.
 - Ideas: FantasyPros source (needs login), archived-props backtest, weather for December games.
 
