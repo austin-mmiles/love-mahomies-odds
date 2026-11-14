@@ -5,23 +5,24 @@ create table if not exists public.bets (
   id          bigint generated always as identity primary key,
   created_at  timestamptz not null default now(),
   kind        text not null default 'bet' check (kind in ('bet','cashout')),
-  bettor      int  not null,                 -- fantasy team id of the person betting
-  market      text not null check (market in ('title','playoffs','bye','final','game','cashout')),
-  team        int  not null,                 -- fantasy team id the bet is about
-  side        text not null check (side in ('yes','no')),
+  bettor      int  not null,                          -- fantasy team id of the person betting
   stake       numeric(12,2) not null check (stake >= 1),
-  price       numeric(5,4)  not null check (price >= 0.01 and price <= 0.99),   -- cost of $1 of payout
-  to_win      numeric(14,2) not null check (to_win > 0),
-  week        int  not null,
+  price       numeric(9,8)  not null check (price > 0 and price < 1),   -- cost of $1 of payout (legs multiplied)
+  to_win      numeric(16,2) not null check (to_win > 0),
+  week        int  not null,                          -- week the bet was placed
+  legs        jsonb not null default '[]'::jsonb,     -- one leg for a single bet, several for a parlay
   ref         bigint references public.bets(id),      -- for a cash-out: the bet being closed
-  amount      numeric(14,2)                           -- for a cash-out: what the house paid
+  amount      numeric(16,2)                           -- for a cash-out: what the house paid
 );
 
 create or replace function public.bets_check() returns trigger language plpgsql as $$
 declare b public.bets;
 begin
   if new.kind = 'bet' then
-    if abs(new.to_win - round(new.stake * (1 - new.price) / new.price, 2)) > 0.02 then
+    if jsonb_typeof(new.legs) <> 'array' or jsonb_array_length(new.legs) < 1 or jsonb_array_length(new.legs) > 8 then
+      raise exception 'A bet needs 1 to 8 picks';
+    end if;
+    if abs(new.to_win - round(new.stake * (1 - new.price) / new.price, 2)) > 0.05 then
       raise exception 'Payout does not match the price';
     end if;
   else

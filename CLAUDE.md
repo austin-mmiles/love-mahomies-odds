@@ -6,7 +6,8 @@ Live at https://austin-mmiles.github.io/love-mahomies-odds/ and served from `doc
 ## What it does
 
 - **Board**: every team's playoff, #1 seed, final and title odds, with week-over-week history.
-- **Sportsbook**: play-money Yes/No bets on those four futures markets.
+- **Sportsbook**: paper-trading bets on futures, weekly games, team totals and player props, with parlays.
+- **Playoff picture**: scenario simulator for seeds.
 - **Matchups**: win chance and moneyline for every remaining game; any-two-teams picker for the current week.
 - **Teams / Players**: roster outlook per player (projection, floor, ceiling, boom, bust, matchup, schedule, usage trend).
 - **How it works**: plain-language method plus a live report of how each projection source has performed.
@@ -50,26 +51,34 @@ Live at https://austin-mmiles.github.io/love-mahomies-odds/ and served from `doc
 
 ## Sportsbook rules (paper trading)
 
-- No login: bettor picks their team from a dropdown. No stake, win or credit limits (set them in
-  `docs/book-config.json` to bring limits back; `null` means unlimited).
-- Markets: Yes/No on title, playoffs, #1 seed, reach the final; plus a moneyline on each of the current week's games.
-- House takes the other side at model price plus 8% vig. Futures trading pauses Sunday 10 am PT until the Tuesday odds
-  update; game bets close at Thursday 5:15 pm PT.
-- Open futures bets are marked to the latest odds and can be cashed out (fair value less the vig).
+- No login: bettor picks their team from a dropdown. No limit on a single bet; each team has a $1,000 credit line
+  (available = 1000 + settled results - open stakes). Settings live in `docs/book-config.json`.
+- Markets: Yes/No on title, playoffs, #1 seed, reach the final; and for the current week: game winners, over/under on
+  each team's score, over/under on each player's fantasy points. Lines sit at the model's median.
+- Parlays: tap several prices to combine up to 8 picks (one per fantasy team, one side per matchup). Price is the
+  product of the leg prices. A voided leg (tie, player did not play) drops out and the rest still count.
+- House takes the other side at model price plus 8% vig. Season-long markets pause Sunday 10 am PT until the Tuesday
+  odds update; weekly markets close Thursday 5:15 pm PT.
+- Open bets are marked to the latest odds; single season-long bets can be cashed out (fair value less the vig).
 - Leaderboard ranks by profit and loss (settled plus open-bet value) and shows return per dollar staked.
-- Bets settle from `outcomes` (futures) and `results` (games) in `latest.json`.
-- Storage: Supabase table `bets` (insert + read only; cash-outs are rows with `kind = 'cashout'`). Until
-  `docs/book-config.json` has the URL and anon key, bets are saved in the visitor's browser only.
-- Teams page has a "Luck check": all-play record vs actual record.
+- Settlement reads `outcomes` (futures), `results` (games, totals) and `player_points` (props) in `latest.json`.
+- Storage: Supabase table `bets` (insert + read only; `legs` is a JSON array; cash-outs are rows with
+  `kind = 'cashout'`). Until `docs/book-config.json` has the URL and anon key, bets stay in the visitor's browser.
+
+## Playoff picture (scenario simulator)
+
+- `#/scenarios`, all in the browser: 5,000 seeded simulations of the remaining regular-season games using each game's
+  model win chance and projected scores; the user can force any game's winner.
+- Shows, for a chosen team: playoff and #1-seed chance, what each final record gets them (playoff chance, possible
+  seeds), which of this week's other games matter most, and the seed grid for all 12 teams.
+- Teams page also has a "Luck check": all-play record vs actual record.
 
 ## Status and open items (update this section as things change)
 
-- [ ] ESPN secrets `ESPN_S2` and `ESPN_SWID` not yet added to the repo; scheduled updates fail until they are.
+- [x] ESPN secrets added 2026-11-14; first live run succeeded with ESPN, Sleeper, nflverse and DraftKings lines.
 - [ ] Supabase project not yet created; sportsbook is in preview mode.
-- [ ] Sleeper and the automated odds fetch have never run on GitHub (blocked where the code was developed); watch the
-      first Action log.
 - [ ] Playoff weeks (15-17) are tested on sample data only; recheck when ESPN posts the bracket.
-- Ideas: parlays, over/under on weekly team totals, player props, FantasyPros source (needs login), archived-props backtest, weather for December games.
+- Ideas: FantasyPros source (needs login), archived-props backtest, weather for December games.
 
 ## Working conventions
 

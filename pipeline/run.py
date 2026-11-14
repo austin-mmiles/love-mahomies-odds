@@ -132,6 +132,9 @@ def main(argv=None):
         "h2h": {str(t): {str(u): p for u, p in d.items()} for t, d in latest["sim"].get("h2h", {}).items()},
         "players": model.player_outlook(L, W, latest["players"], X),
         "outcomes": outcomes(L, W, latest["teams"]),
+        # actual fantasy points for rostered players in recent finished weeks (settles player-prop bets)
+        "player_points": {str(w): {str(e["pid"]): round(e["act"], 2) for ents in L["box"].get(w, {}).values() for e in ents}
+                          for w in range(max(1, W - 4), W) if w in L["box"]},
     }
     with open(os.path.join(a.out, "latest.json"), "w") as f:
         json.dump(out, f, separators=(",", ":"))
