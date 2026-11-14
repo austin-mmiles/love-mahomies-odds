@@ -1,8 +1,8 @@
 {
   "supabase_url": "",
   "supabase_anon_key": "",
-  "max_stake": 20,
-  "max_win": 500,
-  "credit_limit": 500,
+  "max_stake": null,
+  "max_win": null,
+  "credit_limit": null,
   "vig": 0.08
 }

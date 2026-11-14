@@ -156,3 +156,7 @@ dialog#slip input { width: 110px; font-size: 1.2rem; }
 .chip.easy { color: var(--up); border-color: var(--up); } .chip.hard { color: var(--down); border-color: var(--down); }
 .tag.upt { background: none; color: var(--up); border: 1px solid var(--up); } .tag.dnt { background: none; color: var(--down); border: 1px solid var(--down); }
 @media (max-width: 720px) { .px { min-width: 84px; padding: 6px 8px; } .px b { font-size: 1.05rem; } }
+
+.book tr.pair-end td { border-bottom: 3px solid var(--rule); }
+.chipbtn.cash { font-size: .9rem; padding: 5px 10px; border-color: var(--gold); }
+.chipbtn.cash[data-armed="1"] { background: var(--gold); color: #14213d; }

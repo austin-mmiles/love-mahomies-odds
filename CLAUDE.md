@@ -48,15 +48,19 @@ Live at https://austin-mmiles.github.io/love-mahomies-odds/ and served from `doc
 4. Backtest finding to remember: defense-vs-position multipliers on top of ESPN made projections worse, so they are
    display-only. The usage model alone is slightly worse than ESPN; blended it helps RB and WR a little.
 
-## Sportsbook rules (play money)
+## Sportsbook rules (paper trading)
 
-- No login: bettor picks their team from a dropdown.
-- $20 max stake per event (a team in a market, both sides combined); win capped at $500; $500 credit line per bettor
-  (available = 500 + settled results - open stakes).
-- House takes the other side at model price plus 8% vig. Closed Sunday 10 am PT until the Tuesday odds update.
-- Bets settle from `outcomes` in `latest.json` once a market's stage is over.
-- Storage: Supabase table `bets` (insert + read only). Until `docs/book-config.json` has the URL and anon key,
-  bets are saved in the visitor's browser only.
+- No login: bettor picks their team from a dropdown. No stake, win or credit limits (set them in
+  `docs/book-config.json` to bring limits back; `null` means unlimited).
+- Markets: Yes/No on title, playoffs, #1 seed, reach the final; plus a moneyline on each of the current week's games.
+- House takes the other side at model price plus 8% vig. Futures trading pauses Sunday 10 am PT until the Tuesday odds
+  update; game bets close at Thursday 5:15 pm PT.
+- Open futures bets are marked to the latest odds and can be cashed out (fair value less the vig).
+- Leaderboard ranks by profit and loss (settled plus open-bet value) and shows return per dollar staked.
+- Bets settle from `outcomes` (futures) and `results` (games) in `latest.json`.
+- Storage: Supabase table `bets` (insert + read only; cash-outs are rows with `kind = 'cashout'`). Until
+  `docs/book-config.json` has the URL and anon key, bets are saved in the visitor's browser only.
+- Teams page has a "Luck check": all-play record vs actual record.
 
 ## Status and open items (update this section as things change)
 
@@ -65,7 +69,7 @@ Live at https://austin-mmiles.github.io/love-mahomies-odds/ and served from `doc
 - [ ] Sleeper and the automated odds fetch have never run on GitHub (blocked where the code was developed); watch the
       first Action log.
 - [ ] Playoff weeks (15-17) are tested on sample data only; recheck when ESPN posts the bracket.
-- Ideas: weekly matchup bets, FantasyPros source (needs login), archived-props backtest, weather for December games.
+- Ideas: parlays, over/under on weekly team totals, player props, FantasyPros source (needs login), archived-props backtest, weather for December games.
 
 ## Working conventions
 

@@ -29,7 +29,7 @@ shared ledger:
 3. In Project Settings → API, copy the Project URL and the `anon` public key into `docs/book-config.json`
    (`supabase_url`, `supabase_anon_key`) and commit. The anon key is designed to be public.
 
-Limits (stake, win cap, credit line, vig) are in the same file.
+Stake, win and credit limits are off by default (`null`); set numbers in the same file to turn them on. The vig is there too.
 
 ## How it updates
 

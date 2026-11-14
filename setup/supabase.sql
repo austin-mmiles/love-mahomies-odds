@@ -1,38 +1,45 @@
--- Shared bet ledger for the Love Mahomies sportsbook (play money).
--- Run once in Supabase: SQL Editor -> New query -> paste -> Run.
+-- Shared bet ledger for the Love Mahomies sportsbook (paper trading).
+-- Run once in Supabase: SQL Editor -> New query -> paste -> Run. Safe to run again.
 
 create table if not exists public.bets (
   id          bigint generated always as identity primary key,
   created_at  timestamptz not null default now(),
+  kind        text not null default 'bet' check (kind in ('bet','cashout')),
   bettor      int  not null,                 -- fantasy team id of the person betting
-  market      text not null check (market in ('title','playoffs','bye','final')),
+  market      text not null check (market in ('title','playoffs','bye','final','game','cashout')),
   team        int  not null,                 -- fantasy team id the bet is about
   side        text not null check (side in ('yes','no')),
-  stake       numeric(6,2) not null check (stake >= 1 and stake <= 20),
-  price       numeric(5,4) not null check (price >= 0.01 and price <= 0.99),   -- cost of $1 of payout
-  to_win      numeric(7,2) not null check (to_win > 0 and to_win <= 500),
-  week        int  not null
+  stake       numeric(12,2) not null check (stake >= 1),
+  price       numeric(5,4)  not null check (price >= 0.01 and price <= 0.99),   -- cost of $1 of payout
+  to_win      numeric(14,2) not null check (to_win > 0),
+  week        int  not null,
+  ref         bigint references public.bets(id),      -- for a cash-out: the bet being closed
+  amount      numeric(14,2)                           -- for a cash-out: what the house paid
 );
 
--- No more than $20 per bettor on one event (a team in a market), both sides combined.
-create or replace function public.bets_event_cap() returns trigger language plpgsql as $$
+create or replace function public.bets_check() returns trigger language plpgsql as $$
+declare b public.bets;
 begin
-  if (select coalesce(sum(stake), 0) from public.bets
-      where bettor = new.bettor and market = new.market and team = new.team) + new.stake > 20 then
-    raise exception 'Limit is $20 per event';
-  end if;
-  if abs(new.to_win - round(new.stake * (1 - new.price) / new.price, 2)) > 0.02 then
-    raise exception 'Payout does not match the price';
+  if new.kind = 'bet' then
+    if abs(new.to_win - round(new.stake * (1 - new.price) / new.price, 2)) > 0.02 then
+      raise exception 'Payout does not match the price';
+    end if;
+  else
+    select * into b from public.bets where id = new.ref and kind = 'bet';
+    if b.id is null or b.bettor <> new.bettor then raise exception 'That bet cannot be cashed out'; end if;
+    if exists (select 1 from public.bets where kind = 'cashout' and ref = new.ref) then raise exception 'That bet was already cashed out'; end if;
+    if new.amount is null or new.amount < 0 or new.amount > b.stake + b.to_win then raise exception 'Cash-out amount is not valid'; end if;
   end if;
   return new;
 end $$;
 
-drop trigger if exists bets_event_cap on public.bets;
-create trigger bets_event_cap before insert on public.bets for each row execute function public.bets_event_cap();
+drop trigger if exists bets_check on public.bets;
+create trigger bets_check before insert on public.bets for each row execute function public.bets_check();
 
--- Anyone with the site can read the ledger and add a bet. Nobody can edit or delete through the site.
+-- Anyone with the site can read the ledger and add a row. Nobody can edit or delete through the site.
 alter table public.bets enable row level security;
 drop policy if exists "read bets" on public.bets;
 drop policy if exists "place bets" on public.bets;
 create policy "read bets"  on public.bets for select to anon using (true);
 create policy "place bets" on public.bets for insert to anon with check (true);
+grant select, insert on public.bets to anon;

@@ -156,7 +156,19 @@
     app.innerHTML = `<h1>Teams</h1><p class="lede">Pick a team to see its odds history, remaining schedule and roster outlook.</p>
       <div class="scroll"><table><thead><tr><th class="l">Team</th><th>Record</th><th>Expected wins</th><th>Playoffs</th><th>Reach final</th><th>Title</th><th class="l">Playoff trend</th></tr></thead><tbody>
       ${rows.map(r => `<tr><td class="l">${teamLink(r.id)}</td><td>${rec(r)}</td><td>${r.exp_wins.toFixed(1)}</td><td>${pct(r.playoffs)}</td><td>${pct(r.final)}</td><td>${pct(r.title)}</td><td class="l">${spark(series(r.id, 'playoffs'), T[r.id].color)}</td></tr>`).join('')}
+      </tbody></table></div>
+      <h2>Luck check</h2>
+      <p class="lede">All-play record is how each team would have done playing every other team every week. The gap to the real record is schedule luck.</p>
+      <div class="scroll"><table><thead><tr><th class="l">Team</th><th>Record</th><th>All-play record</th><th>All-play win rate</th><th>Wins it deserved</th><th>Luck, in wins</th><th>Points against</th></tr></thead><tbody>
+      ${luckRows().map(x => `<tr><td class="l">${teamLink(x.id)}</td><td>${rec(D.teams[x.id])}</td><td>${x.w}-${x.l}</td><td>${pct(x.rate, 0)}</td><td>${x.deserved.toFixed(1)}</td><td class="${x.luck > 0.3 ? 'up' : x.luck < -0.3 ? 'down' : ''}"><b>${x.luck > 0 ? '+' : x.luck < 0 ? '−' : ''}${Math.abs(x.luck).toFixed(1)}</b></td><td>${D.teams[x.id].pa.toFixed(1)}</td></tr>`).join('')}
       </tbody></table></div>`;
+  }
+  function luckRows() {
+    const byWeek = {};
+    D.results.forEach(g => { (byWeek[g.week] = byWeek[g.week] || []).push([String(g.home), g.hs], [String(g.away), g.as]); });
+    const acc = {}; ids.forEach(id => acc[id] = { id, w: 0, l: 0, games: 0 });
+    Object.values(byWeek).forEach(list => list.forEach(([id, s]) => { if (!acc[id]) return; acc[id].games++; list.forEach(([o, so]) => { if (o !== id) { if (s > so) acc[id].w++; else if (s < so) acc[id].l++; } }); }));
+    return Object.values(acc).map(x => { const rate = x.w + x.l ? x.w / (x.w + x.l) : 0, deserved = rate * x.games; return Object.assign(x, { rate, deserved, luck: D.teams[x.id].w + 0.5 * (D.teams[x.id].t || 0) - deserved }); }).sort((a, b) => b.luck - a.luck);
   }
 
   function sosChip(v) {
@@ -260,16 +272,16 @@
         <li>The sportsbook is play money, for league fun only.</li></ul></div>`;
   }
 
-  // ---------- sportsbook (play money) ----------
-  const MARKETS = { title: 'Win the title', playoffs: 'Make the playoffs', bye: 'Earn the #1 seed', final: 'Reach the final' };
+  // ---------- sportsbook (paper trading) ----------
+  const MARKETS = { title: 'Win the title', playoffs: 'Make the playoffs', bye: 'Earn the #1 seed', final: 'Reach the final', game: 'This week\'s games' };
   const BOOK = { cfg: null, bets: [], me: null, market: 'title', remote: false, error: null };
-  const money = (v, sign) => (sign && v > 0 ? '+' : v < 0 ? '−' : '') + '$' + Math.abs(v).toFixed(2).replace(/\.00$/, '');
+  const money = (v, sign) => (sign && v > 0 ? '+' : v < 0 ? '−' : '') + '$' + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: Math.abs(v) % 1 ? 2 : 0, maximumFractionDigits: 2 });
   function am(q) { const a = q >= 0.5 ? -100 * q / (1 - q) : 100 * (1 - q) / q; const r = Math.abs(a) >= 1000 ? Math.round(a / 50) * 50 : Math.abs(a) >= 300 ? Math.round(a / 5) * 5 : Math.round(a); return (r > 0 ? '+' : '−') + Math.abs(r).toLocaleString('en-US'); }
   async function bookInit() {
     if (BOOK.cfg) return;
     let cfg = {};
     try { cfg = await fetch('book-config.json?t=' + Date.now()).then(r => r.json()); } catch (e) {}
-    BOOK.cfg = Object.assign({ max_stake: 20, max_win: 500, credit_limit: 500, vig: 0.08 }, cfg);
+    BOOK.cfg = Object.assign({ max_stake: null, max_win: null, credit_limit: null, vig: 0.08 }, cfg);
     BOOK.remote = !!(BOOK.cfg.supabase_url && BOOK.cfg.supabase_anon_key);
     try { BOOK.me = localStorage.getItem('bettor'); } catch (e) {}
     if (!T[BOOK.me]) BOOK.me = null;
@@ -278,72 +290,106 @@
   const sbHeaders = () => ({ apikey: BOOK.cfg.supabase_anon_key, Authorization: 'Bearer ' + BOOK.cfg.supabase_anon_key, 'Content-Type': 'application/json' });
   async function loadBets() {
     BOOK.error = null;
+    let rows = [];
     if (BOOK.remote) {
       try {
-        const r = await fetch(BOOK.cfg.supabase_url.replace(/\/$/, '') + '/rest/v1/bets?select=*&order=created_at.asc', { headers: sbHeaders() });
+        const r = await fetch(BOOK.cfg.supabase_url.replace(/\/$/, '') + '/rest/v1/bets?select=*&order=id.asc', { headers: sbHeaders() });
         if (!r.ok) throw new Error(await r.text());
-        BOOK.bets = await r.json();
-      } catch (e) { BOOK.error = 'The shared bet ledger could not be reached. Reload to try again.'; BOOK.bets = []; }
+        rows = await r.json();
+      } catch (e) { BOOK.error = 'The shared bet ledger could not be reached. Reload to try again.'; }
     } else {
-      try { BOOK.bets = JSON.parse(localStorage.getItem('demo_bets') || '[]'); } catch (e) { BOOK.bets = []; }
+      try { rows = JSON.parse(localStorage.getItem('paper_bets') || '[]'); } catch (e) {}
     }
-    BOOK.bets.forEach(b => { b.stake = +b.stake; b.price = +b.price; b.to_win = +b.to_win; b.bettor = String(b.bettor); b.team = String(b.team); });
+    const cash = {};
+    rows.filter(b => b.kind === 'cashout').forEach(c => { cash[c.ref] = +c.amount; });
+    BOOK.bets = rows.filter(b => b.kind !== 'cashout').map(b => Object.assign({}, b, { stake: +b.stake, price: +b.price, to_win: +b.to_win, bettor: String(b.bettor), team: String(b.team), cashed: cash[b.id] }));
+    BOOK.raw = rows;
   }
-  async function saveBet(b) {
+  async function saveRow(row) {
     if (BOOK.remote) {
-      const r = await fetch(BOOK.cfg.supabase_url.replace(/\/$/, '') + '/rest/v1/bets', { method: 'POST', headers: Object.assign({ Prefer: 'return=representation' }, sbHeaders()), body: JSON.stringify(Object.assign({}, b, { bettor: +b.bettor, team: +b.team })) });
-      if (!r.ok) { let m = 'The bet was not saved.'; try { m = (await r.json()).message || m; } catch (e) {} throw new Error(m); }
-      await loadBets();
+      const r = await fetch(BOOK.cfg.supabase_url.replace(/\/$/, '') + '/rest/v1/bets', { method: 'POST', headers: Object.assign({ Prefer: 'return=minimal' }, sbHeaders()), body: JSON.stringify(row) });
+      if (!r.ok) { let m = 'That was not saved. Try again.'; try { m = (await r.json()).message || m; } catch (e) {} throw new Error(m); }
     } else {
-      BOOK.bets.push(Object.assign({ id: Date.now(), created_at: new Date().toISOString() }, b));
-      try { localStorage.setItem('demo_bets', JSON.stringify(BOOK.bets)); } catch (e) {}
+      const rows = BOOK.raw || []; rows.push(Object.assign({ id: Date.now(), created_at: new Date().toISOString() }, row));
+      try { localStorage.setItem('paper_bets', JSON.stringify(rows)); } catch (e) {}
     }
+    await loadBets();
   }
-  function bookStatus() {            // closed while the week's games are being played and until the odds refresh
-    if (D.season_over) return { open: false, why: 'The season is over. All bets are settled.' };
+  function ptClock() {               // hours since Sunday 10 am Pacific, and whether the odds are from this week
     const pt = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
-    const since = ((pt.getDay() * 24 + pt.getHours() + pt.getMinutes() / 60) - 10 + 168) % 168;   // hours since Sunday 10 am Pacific
-    if (since < 38) return { open: false, why: 'Betting is closed while this week\'s games are played. It reopens Tuesday once the odds update.' };
-    if ((Date.now() - new Date(D.updated).getTime()) / 36e5 > since - 38) return { open: false, why: 'Waiting for this week\'s odds update. Betting reopens as soon as it lands.' };
+    const since = ((pt.getDay() * 24 + pt.getHours() + pt.getMinutes() / 60) - 10 + 168) % 168;
+    return { since, fresh: (Date.now() - new Date(D.updated).getTime()) / 36e5 <= since - 38 };
+  }
+  function bookStatus(market) {      // futures close while games are played; game bets close at Thursday kickoff
+    if (D.season_over) return { open: false, why: 'The season is over. Everything is settled.' };
+    const c = ptClock();
+    if (c.since < 38) return { open: false, why: 'Trading is paused while this week\'s games are played. It reopens Tuesday once the odds update.' };
+    if (!c.fresh) return { open: false, why: 'Waiting for this week\'s odds update. Trading reopens as soon as it lands.' };
+    if (market === 'game' && c.since >= 103.25) return { open: false, why: `Week ${D.week} game bets closed at Thursday kickoff. Next week's games open Tuesday.` };
     return { open: true };
   }
-  const outcomeOf = b => (D.outcomes && D.outcomes[b.market] ? D.outcomes[b.market][b.team] : undefined);
-  function settle(b) { const o = outcomeOf(b); if (o === undefined) return null; return ((b.side === 'yes') === !!o) ? b.to_win : -b.stake; }
+  function prob(b) {                 // current model chance that this bet's side wins; undefined when unknown
+    if (b.market === 'game') {
+      const g = D.games.find(x => x.week === b.week && (String(x.home) === b.team || String(x.away) === b.team));
+      return g ? (String(g.home) === b.team ? g.p_home : 1 - g.p_home) : undefined;
+    }
+    const p = D.teams[b.team] ? D.teams[b.team][b.market] : undefined;
+    return p == null ? undefined : (b.side === 'yes' ? p : 1 - p);
+  }
+  function settle(b) {               // profit once decided, else null
+    if (b.cashed != null) return b.cashed - b.stake;
+    if (b.market === 'game') {
+      const g = D.results.find(x => x.week === b.week && (String(x.home) === b.team || String(x.away) === b.team));
+      if (!g) return null;
+      const us = String(g.home) === b.team ? g.hs : g.as, them = String(g.home) === b.team ? g.as : g.hs;
+      return us > them ? b.to_win : us < them ? -b.stake : 0;
+    }
+    const o = D.outcomes && D.outcomes[b.market] ? D.outcomes[b.market][b.team] : undefined;
+    if (o === undefined) return null;
+    return ((b.side === 'yes') === !!o) ? b.to_win : -b.stake;
+  }
+  function cashValue(b) {            // what the house pays to close an open futures bet now
+    if (b.market === 'game' || settle(b) !== null) return null;
+    const ps = prob(b); if (ps == null) return null;
+    return Math.round((b.stake + b.to_win) * Math.max(0, ps * (1 - BOOK.cfg.vig) - 0.005) * 100) / 100;
+  }
+  function markValue(b) { const ps = prob(b); return ps == null ? b.stake : (b.stake + b.to_win) * ps; }   // fair value of an open bet
   function wallet(id) {
     const mine = BOOK.bets.filter(b => b.bettor === String(id));
-    let settled = 0, risk = 0;
-    mine.forEach(b => { const r = settle(b); if (r === null) risk += b.stake; else settled += r; });
-    return { settled, risk, left: BOOK.cfg.credit_limit + settled - risk, n: mine.length, mine };
+    let settled = 0, risk = 0, value = 0, staked = 0;
+    mine.forEach(b => { staked += b.stake; const r = settle(b); if (r === null) { risk += b.stake; value += markValue(b); } else settled += r; });
+    const total = settled + value - risk;
+    return { settled, risk, value, total, staked, roi: staked ? total / staked : 0, n: mine.length, mine,
+      left: BOOK.cfg.credit_limit == null ? Infinity : BOOK.cfg.credit_limit + settled - risk };
   }
-  function quote(market, team, side) {   // price of $1 of payout for this side, or null when the side is off the board
-    const p = D.teams[team][market], ps = side === 'yes' ? p : 1 - p;
-    if (D.outcomes && D.outcomes[market]) return null;
-    if (ps < 0.003 || ps > 0.997) return null;
+  function quote(market, team, side) {
+    const ps = prob({ market, team: String(team), side, week: D.week });
+    if (ps == null || (market !== 'game' && D.outcomes && D.outcomes[market])) return null;
+    if (ps < 0.003 || ps > 0.985) return null;
     return Math.min(0.985, Math.max(0.01, ps * (1 + BOOK.cfg.vig) + 0.005));
   }
   function maxStake(market, team, q) {
-    const w = wallet(BOOK.me), c = BOOK.cfg;
-    const onEvent = w.mine.filter(b => b.market === market && b.team === String(team)).reduce((a, b) => a + b.stake, 0);
-    const caps = [[c.max_stake - onEvent, `You already have ${money(onEvent)} on this event. The limit is ${money(c.max_stake)} an event.`],
-      [Math.floor(c.max_win * q / (1 - q) * 100) / 100, `Wins are capped at ${money(c.max_win)}, so this price takes a smaller stake.`],
-      [Math.floor(w.left), w.left < 1 ? `You have used your ${money(c.credit_limit)} credit line. Win an open bet to get back in.` : `You have ${money(w.left)} of credit left.`]];
+    const w = wallet(BOOK.me), c = BOOK.cfg, caps = [[1e7, '']];
+    if (c.max_stake != null) { const on = w.mine.filter(b => b.market === market && b.team === String(team) && (market !== 'game' || b.week === D.week)).reduce((a, b) => a + b.stake, 0); caps.push([c.max_stake - on, `You already have ${money(on)} on this event. The limit is ${money(c.max_stake)} an event.`]); }
+    if (c.max_win != null) caps.push([Math.floor(c.max_win * q / (1 - q)), `Wins are capped at ${money(c.max_win)}, so this price takes a smaller stake.`]);
+    if (c.credit_limit != null) caps.push([Math.floor(w.left), w.left < 1 ? `You have used your ${money(c.credit_limit)} credit line.` : `You have ${money(w.left)} of credit left.`]);
     caps.sort((a, b) => a[0] - b[0]);
-    return { max: Math.max(0, Math.min(c.max_stake, caps[0][0])), why: caps[0][1], bound: caps[0][0] < c.max_stake };
+    return { max: Math.max(0, Math.floor(caps[0][0])), why: caps[0][1], limited: caps[0][0] < 1e7 };
   }
-  function openSlip(team, side) {
-    const market = BOOK.market, q = quote(market, team, side);
+  function openSlip(market, team, side) {
+    const q = quote(market, team, side);
     if (!q) return;
     const lim = maxStake(market, team, q);
     let dlg = $('#slip'); if (dlg) dlg.remove();
     dlg = document.createElement('dialog'); dlg.id = 'slip';
-    const start = Math.min(10, Math.floor(lim.max));
+    const what = market === 'game' ? `${esc(T[team].name)} to win in week ${D.week}` : `<span class="side ${side}">${side === 'yes' ? 'Yes' : 'No'}</span> ${esc(T[team].name)}: ${MARKETS[market].toLowerCase()}`;
     dlg.innerHTML = `<form method="dialog"><h3>Bet slip</h3>
-      <p class="pick-line"><span class="side ${side}">${side === 'yes' ? 'Yes' : 'No'}</span> ${esc(T[team].name)}: ${MARKETS[market].toLowerCase()}</p>
+      <p class="pick-line">${what}</p>
       <p class="sub">Price ${am(q)} (${Math.round(q * 100)}¢ per $1 of payout). Betting as ${esc(T[BOOK.me].name)}.</p>
-      ${lim.max >= 1 ? `<label for="stake">Stake, $1 to ${money(Math.floor(lim.max))}</label>
-        <div class="row"><input class="pick" id="stake" type="number" inputmode="numeric" min="1" max="${Math.floor(lim.max)}" step="1" value="${start}">
-        ${[5, 10, 20].filter(v => v <= lim.max).map(v => `<button type="button" class="chipbtn" data-v="${v}">$${v}</button>`).join('')}</div>
-        <p class="towin">To win <b id="tw"></b></p>${lim.bound ? `<p class="sub">${lim.why}</p>` : ''}<p class="err" id="sliperr" role="alert"></p>
+      ${lim.max >= 1 ? `<label for="stake">Stake${lim.limited ? `, up to ${money(lim.max)}` : ''}</label>
+        <div class="row"><input class="pick" id="stake" type="number" inputmode="numeric" min="1" ${lim.limited ? `max="${lim.max}"` : ''} step="1" value="${Math.min(25, lim.max)}">
+        ${[10, 50, 100, 500].filter(v => v <= lim.max).map(v => `<button type="button" class="chipbtn" data-v="${v}">$${v}</button>`).join('')}</div>
+        <p class="towin">To win <b id="tw"></b></p>${lim.limited ? `<p class="sub">${lim.why}</p>` : ''}<p class="err" id="sliperr" role="alert"></p>
         <div class="row end"><button type="button" class="btn ghost" id="cancel">Cancel</button><button type="button" class="btn" id="place">Place bet</button></div>`
         : `<p class="err">${lim.why}</p><div class="row end"><button type="button" class="btn ghost" id="cancel">Close</button></div>`}</form>`;
     document.body.appendChild(dlg);
@@ -354,47 +400,67 @@
     const place = $('#place', dlg);
     if (place) place.addEventListener('click', async () => {
       const v = Math.floor(+inp.value || 0), err = $('#sliperr', dlg);
-      if (v < 1 || v > Math.floor(lim.max)) { err.textContent = `Enter a whole-dollar stake from $1 to ${money(Math.floor(lim.max))}.`; return; }
+      if (v < 1 || v > lim.max) { err.textContent = lim.limited ? `Enter a whole-dollar stake from $1 to ${money(lim.max)}.` : 'Enter a whole-dollar stake of at least $1.'; return; }
       place.disabled = true; place.textContent = 'Placing…';
       try {
-        await saveBet({ bettor: BOOK.me, market, team: String(team), side, stake: v, price: Math.round(q * 1e4) / 1e4, to_win: win(v), week: D.week });
-        dlg.close(); viewBook(`Bet placed: ${side === 'yes' ? 'Yes' : 'No'} on ${T[team].name}, ${money(v)} to win ${money(win(v))}.`);
+        await saveRow({ kind: 'bet', bettor: +BOOK.me, market, team: +team, side, stake: v, price: Math.round(q * 1e4) / 1e4, to_win: win(v), week: D.week });
+        dlg.close(); viewBook(`Bet placed: ${market === 'game' ? T[team].name + ' to win' : (side === 'yes' ? 'Yes' : 'No') + ' on ' + T[team].name}, ${money(v)} to win ${money(win(v))}.`);
       } catch (e) { err.textContent = e.message; place.disabled = false; place.textContent = 'Place bet'; }
     });
     dlg.addEventListener('close', () => dlg.remove());
     dlg.showModal();
   }
-  const betLine = b => `<span class="side ${b.side}">${b.side === 'yes' ? 'Yes' : 'No'}</span> ${esc(T[b.team]?.name || '?')}, ${MARKETS[b.market].toLowerCase()}`;
+  const betLine = b => b.market === 'game' ? `${esc(T[b.team]?.name || '?')} to win, week ${b.week}` : `<span class="side ${b.side}">${b.side === 'yes' ? 'Yes' : 'No'}</span> ${esc(T[b.team]?.name || '?')}, ${MARKETS[b.market].toLowerCase()}`;
+  const moved = (id, m) => { const b = prevSnap?.teams[id]?.[m]; return b == null ? '' : ' ' + delta(D.teams[id][m], b); };
   async function viewBook(flash) {
     if (!BOOK.cfg) { app.innerHTML = '<p class="loading">Opening the book…</p>'; await bookInit(); }
-    const st = bookStatus(), c = BOOK.cfg, m = BOOK.market, w = BOOK.me ? wallet(BOOK.me) : null;
-    const rows = ids.map(id => ({ id, p: D.teams[id][m] })).sort((a, b) => b.p - a.p);
-    const btn = (id, side) => { const q = quote(m, id, side); return q && st.open ? `<button class="px ${side}" data-team="${id}" data-side="${side}" ${BOOK.me ? '' : 'disabled'}><span>${side === 'yes' ? 'Yes' : 'No'}</span><b>${am(q)}</b><i>${Math.round(q * 100)}¢</i></button>` : `<span class="px off">${D.outcomes && D.outcomes[m] ? ((side === 'yes') === !!D.outcomes[m][id] ? 'Won' : 'Lost') : 'Off'}</span>`; };
-    const board = ids.map(id => Object.assign({ id }, wallet(id))).filter(x => x.n).sort((a, b) => b.settled - a.settled || b.left - a.left);
+    const c = BOOK.cfg, m = BOOK.market, st = bookStatus(m), w = BOOK.me ? wallet(BOOK.me) : null;
+    const px = (mk, id, side, label) => { const q = quote(mk, id, side); return q && st.open ? `<button class="px ${side}" data-mk="${mk}" data-team="${id}" data-side="${side}" ${BOOK.me ? '' : 'disabled'}><span>${label}</span><b>${am(q)}</b><i>${Math.round(q * 100)}¢</i></button>` : `<span class="px off">${mk !== 'game' && D.outcomes && D.outcomes[mk] ? ((side === 'yes') === !!D.outcomes[mk][id] ? 'Won' : 'Lost') : 'Off'}</span>`; };
+    let table;
+    if (m === 'game') {
+      const gs = D.games.filter(g => g.week === D.week);
+      table = gs.length ? `<div class="scroll"><table class="book"><thead><tr><th class="l">Week ${D.week} game</th><th class="hm">Projected</th><th>To win</th></tr></thead><tbody>
+        ${gs.map(g => [[g.away, 1 - g.p_home, g.proj_away], [g.home, g.p_home, g.proj_home]].map(([id, p, pr], k) => `<tr class="${k ? 'pair-end' : ''}"><td class="l">${teamLink(id)}<span class="sub"> ${pct(p, 0)}</span></td><td class="hm">${pr.toFixed(1)}</td><td>${px('game', id, 'yes', 'Win')}</td></tr>`).join('')).join('')}
+        </tbody></table></div>` : '<p class="empty">No games on the board this week.</p>';
+    } else {
+      const rows = ids.map(id => ({ id, p: D.teams[id][m] })).sort((a, b) => b.p - a.p);
+      table = `<div class="scroll"><table class="book"><thead><tr><th class="l">Team</th><th class="hm">Model chance</th><th class="hm">Since last week</th><th>Yes</th><th>No</th></tr></thead><tbody>
+        ${rows.map(r => `<tr><td class="l">${teamLink(r.id)}<span class="sub rec-m"> ${pct(r.p)}</span></td><td class="hm">${pct(r.p)}</td><td class="hm">${moved(r.id, m)}</td><td>${px(m, r.id, 'yes', 'Yes')}</td><td>${px(m, r.id, 'no', 'No')}</td></tr>`).join('')}
+        </tbody></table></div>`;
+    }
+    const board = ids.map(id => Object.assign({ id }, wallet(id))).filter(x => x.n).sort((a, b) => b.total - a.total);
     const recent = BOOK.bets.slice(-12).reverse();
+    const futOpen = bookStatus('title').open;
+    const cls = v => v > 0.005 ? 'up' : v < -0.005 ? 'down' : '';
     app.innerHTML = `<h1>Sportsbook</h1>
-      <p class="lede">Play money. Bet Yes or No on any team, up to ${money(c.max_stake)} an event, with wins capped at ${money(c.max_win)}. Everyone has a ${money(c.credit_limit)} credit line; run it out and you are done until a bet wins.</p>
+      <p class="lede">Paper trading for bragging rights. Bet Yes or No on any team's season, or pick this week's winners. ${c.max_stake == null && c.credit_limit == null ? 'No stake limits.' : ''} Open bets are marked to the latest odds, and you can cash out early.</p>
       ${flash ? `<p class="flash" role="status">${esc(flash)}</p>` : ''}
       ${BOOK.error ? `<p class="note">${BOOK.error}</p>` : ''}
       ${!BOOK.remote ? '<p class="note">Preview mode: bets are saved in this browser only. Once the shared ledger is connected, everyone will see the same bets.</p>' : ''}
       ${!st.open ? `<p class="note">${st.why}</p>` : ''}
       <div class="wallet"><label for="me">Betting as</label><select class="pick" id="me"><option value="">Pick your team</option>${ids.map(t => `<option value="${t}" ${t === BOOK.me ? 'selected' : ''}>${esc(T[t].name)}</option>`).join('')}</select>
-        ${w ? `<div><b>${money(Math.max(0, w.left))}</b><span>Credit left</span></div><div><b>${money(w.risk)}</b><span>At risk</span></div><div><b class="${w.settled > 0 ? 'up' : w.settled < 0 ? 'down' : ''}">${money(w.settled, true)}</b><span>Settled</span></div>` : '<span class="sub">Pick your team to place bets.</span>'}</div>
+        ${w ? `<div><b class="${cls(w.total)}">${money(w.total, true)}</b><span>Profit and loss</span></div><div><b>${money(w.risk)}</b><span>Open stakes</span></div><div><b>${money(w.value)}</b><span>Open bets worth now</span></div><div><b class="${cls(w.settled)}">${money(w.settled, true)}</b><span>Settled</span></div>` : '<span class="sub">Pick your team to place bets.</span>'}</div>
       <div class="row"><div class="seg" role="group" aria-label="Market">${Object.entries(MARKETS).map(([k, v]) => `<button data-m="${k}" aria-pressed="${k === m}">${v}</button>`).join('')}</div></div>
-      <div class="scroll"><table class="book"><thead><tr><th class="l">Team</th><th class="hm">Model chance</th><th>Yes</th><th>No</th></tr></thead><tbody>
-        ${rows.map(r => `<tr><td class="l">${teamLink(r.id)}<span class="sub rec-m"> ${pct(r.p)}</span></td><td class="hm">${pct(r.p)}</td><td>${btn(r.id, 'yes')}</td><td>${btn(r.id, 'no')}</td></tr>`).join('')}
-      </tbody></table></div>
-      <p class="sub">Yes pays if it happens, No pays if it does not. Prices include the house's cut and are locked in when you place the bet.</p>
-      ${w ? `<h2>My bets</h2>${w.mine.length ? `<div class="scroll"><table><thead><tr><th class="l">Bet</th><th>Week</th><th>Stake</th><th>To win</th><th>Result</th></tr></thead><tbody>
-        ${w.mine.slice().reverse().map(b => { const r = settle(b); return `<tr><td class="l">${betLine(b)} <span class="sub">${am(b.price)}</span></td><td>${b.week}</td><td>${money(b.stake)}</td><td>${money(b.to_win)}</td><td>${r === null ? '<span class="sub">Open</span>' : `<b class="${r > 0 ? 'up' : 'down'}">${money(r, true)}</b>`}</td></tr>`; }).join('')}
+      ${table}
+      <p class="sub">${m === 'game' ? 'Pick a team to win its matchup. A tie returns your stake.' : 'Yes pays if it happens, No pays if it does not.'} Prices include the house's cut and are locked in when you place the bet.</p>
+      ${w ? `<h2>My bets</h2>${w.mine.length ? `<div class="scroll"><table class="mybets"><thead><tr><th class="l">Bet</th><th>Stake</th><th>To win</th><th>Worth now</th><th>Result</th></tr></thead><tbody>
+        ${w.mine.slice().reverse().map(b => { const r = settle(b), cv = cashValue(b); return `<tr><td class="l">${betLine(b)} <span class="sub">${am(b.price)}${b.market === 'game' ? '' : ', week ' + b.week}</span></td><td>${money(b.stake)}</td><td>${money(b.to_win)}</td>
+          <td>${r === null ? `${money(markValue(b))}` : '–'}</td><td>${r === null ? (cv != null && futOpen ? `<button class="chipbtn cash" data-id="${b.id}" data-v="${cv}">Cash out ${money(cv)}</button>` : '<span class="sub">Open</span>') : `<b class="${cls(r)}">${money(r, true)}</b>${b.cashed != null ? ' <span class="sub">cashed out</span>' : ''}`}</td></tr>`; }).join('')}
         </tbody></table></div>` : '<p class="empty">No bets yet. Pick a price above to place your first one.</p>'}` : ''}
-      <h2>Standings</h2>${board.length ? `<div class="scroll"><table><thead><tr><th class="l">Bettor</th><th>Settled</th><th>At risk</th><th>Credit left</th><th>Bets</th></tr></thead><tbody>
-        ${board.map(x => `<tr><td class="l">${teamLink(x.id)}</td><td class="${x.settled > 0 ? 'up' : x.settled < 0 ? 'down' : ''}">${money(x.settled, true)}</td><td>${money(x.risk)}</td><td>${money(Math.max(0, x.left))}</td><td>${x.n}</td></tr>`).join('')}
-        </tbody></table></div>` : '<p class="empty">Nobody has bet yet.</p>'}
-      ${recent.length ? `<h2>Latest bets</h2><ul class="feed">${recent.map(b => `<li><b>${esc(T[b.bettor]?.name || '?')}</b> ${betLine(b)} <span class="sub">${money(b.stake)} to win ${money(b.to_win)}, week ${b.week}</span></li>`).join('')}</ul>` : ''}`;
+      <h2>Leaderboard</h2>${board.length ? `<div class="scroll"><table><thead><tr><th class="l" colspan="2">Bettor</th><th>Profit and loss</th><th>Return</th><th class="hm">Settled</th><th class="hm">Open stakes</th><th>Bets</th></tr></thead><tbody>
+        ${board.map((x, i) => `<tr><td class="rank">${i + 1}</td><td class="l">${teamLink(x.id)}</td><td class="${cls(x.total)}"><b>${money(x.total, true)}</b></td><td class="${cls(x.roi)}">${(100 * x.roi).toFixed(0)}%</td><td class="hm ${cls(x.settled)}">${money(x.settled, true)}</td><td class="hm">${money(x.risk)}</td><td>${x.n}</td></tr>`).join('')}
+        </tbody></table></div><p class="sub">Profit and loss counts settled bets plus what open bets are worth at today's odds. Return is profit per dollar staked.</p>` : '<p class="empty">Nobody has bet yet. Be the first on the board.</p>'}
+      ${recent.length ? `<h2>Latest bets</h2><ul class="feed">${recent.map(b => `<li><b>${esc(T[b.bettor]?.name || '?')}</b>: ${betLine(b)} <span class="sub">${money(b.stake)} to win ${money(b.to_win)}</span></li>`).join('')}</ul>` : ''}`;
     $('#me').addEventListener('change', e => { BOOK.me = e.target.value || null; try { localStorage.setItem('bettor', BOOK.me || ''); } catch (x) {} viewBook(); });
     app.querySelector('.seg').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { BOOK.market = b.dataset.m; viewBook(); } });
-    app.querySelector('.book').addEventListener('click', e => { const b = e.target.closest('button.px'); if (b) openSlip(b.dataset.team, b.dataset.side); });
+    const bk = app.querySelector('.book'); if (bk) bk.addEventListener('click', e => { const b = e.target.closest('button.px'); if (b) openSlip(b.dataset.mk, b.dataset.team, b.dataset.side); });
+    const mb = app.querySelector('.mybets'); if (mb) mb.addEventListener('click', async e => {
+      const b = e.target.closest('button.cash'); if (!b) return;
+      if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = `Confirm ${money(+b.dataset.v)}`; return; }
+      b.disabled = true;
+      try { await saveRow({ kind: 'cashout', bettor: +BOOK.me, market: 'cashout', team: 0, side: 'yes', stake: 1, price: 0.5, to_win: 1, week: D.week, ref: +b.dataset.id, amount: +b.dataset.v }); viewBook(`Cashed out for ${money(+b.dataset.v)}.`); }
+      catch (x) { viewBook(x.message); }
+    });
   }
 
   // ---------- shell ----------
